@@ -1,0 +1,25 @@
+# THE TRAP. Looks like 04, but the extra "-" before podSelector makes TWO list items = OR:
+#   "any Pod in kube-system"  OR  "Pods labelled k8s-app=kube-dns in demo".
+# Apply it only to read `kubectl describe`, then delete it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trap-or
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

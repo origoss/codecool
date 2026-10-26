@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DaemonSets</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/lesson.js" defer></script>
+</head>
+<body>
+<main>
+
+<p class="crumbs">Session · Lesson 05 · about 20 minutes</p>
+<h1>DaemonSets: one Pod on every node</h1>
+
+<div class="win">
+  <strong>Your win:</strong> you can explain why the CNI, the Pod Identity Agent and log collectors run as DaemonSets, predict on which nodes a DaemonSet puts its Pods, and roll out a new version node by node.
+</div>
+
+<p class="meta">Before this: <a href="0000-yaml-anatomy.html">lesson 00</a> (labels and selectors), and you have already met three DaemonSets without the name: <code>aws-node</code> (the VPC CNI that enforces NetworkPolicy in <a href="0004-network-policies.html">lesson 04</a>), <code>eks-pod-identity-agent</code> (which hands AWS credentials to ESO in <a href="0003-external-secrets-aws.html">lesson 03</a>) and <code>kube-proxy</code>. Example files: <code>examples/daemonsets/</code>.</p>
+
+<h2>What a DaemonSet is for</h2>
+
+<p>"A <em>DaemonSet</em> ensures that all (or some) Nodes run a copy of a Pod. As nodes are added to the cluster, Pods are added to them. As nodes are removed from the cluster, those Pods are garbage collected."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/">[1]</a></sup> Typical uses: a storage daemon, a log collector or a monitoring agent on every node.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/">[1]</a></sup> Network plugins "often include a component that runs as a DaemonSet", which makes sure the node it runs on "has working cluster networking".<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#deployments">[1]</a></sup></p>
+
+<figure class="diagram">
+  <a href="../assets/diagrams/k8s-architecture.svg"><img src="../assets/diagrams/k8s-architecture.svg" alt="Kubernetes control plane and data plane; every worker node runs kubelet, kube-proxy and a CNI agent"></a>
+  <figcaption>The node agents in the data plane (kube-proxy, the CNI) are exactly what DaemonSets are for: one copy per node, added automatically when a node joins.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th></th><th>Deployment</th><th>DaemonSet</th></tr></thead>
+  <tbody>
+    <tr><td>You say</td><td>"run <code>replicas: 3</code> somewhere"</td><td>"run one on every (matching) node"</td></tr>
+    <tr><td>Pod count</td><td>fixed by you</td><td>follows the number of eligible nodes</td></tr>
+    <tr><td>Where Pods land</td><td>wherever the scheduler finds room</td><td>exactly one per eligible node</td></tr>
+    <tr><td>Use it for</td><td>stateless apps, where scaling matters more than the host<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#deployments">[1]</a></sup></td><td>node-level functions that other Pods on that node depend on<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#deployments">[1]</a></sup></td></tr>
+    <tr><td>Selector</td><td colspan="2">required, must match the template labels, immutable after creation<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#pod-selector">[2]</a></sup> (same rules as <a href="0000-yaml-anatomy.html">lesson 00</a>)</td></tr>
+  </tbody>
+</table>
+
+<h2>Which nodes? Taints, tolerations and selectors</h2>
+
+<p>Without extra settings a DaemonSet puts a Pod on <em>all</em> nodes. You narrow it with <code>nodeSelector</code> or node affinity in the Pod template.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#running-pods-on-select-nodes">[3]</a></sup> In the other direction, a node can push Pods away with a <strong>taint</strong>; only Pods with a matching <strong>toleration</strong> may land there.</p>
+
+<p>Because node agents must run even on sick nodes, the DaemonSet controller adds a set of tolerations to its Pods automatically: for <code>not-ready</code>, <code>unreachable</code>, <code>disk-pressure</code>, <code>memory-pressure</code>, <code>pid-pressure</code> and <code>unschedulable</code> nodes.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#taints-and-tolerations">[4]</a></sup> Why: otherwise "you could end up in a deadlock situation where the node is not marked as ready because the network plugin is not running there, and at the same time the network plugin is not running on that node because the node is not yet ready."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#taints-and-tolerations">[4]</a></sup></p>
+
+<p class="note">The automatic list does <em>not</em> include any other taint. On a self-managed cluster (kubeadm, kind) the control-plane nodes carry <code>node-role.kubernetes.io/control-plane:NoSchedule</code>, so you add that toleration yourself if the agent must run there too. On EKS you never see the control-plane nodes: AWS runs them, so DaemonSets cover your worker nodes only. The demo therefore uses a taint of our own. Dedicated node groups on EKS are tainted the same way (the <code>taints</code> setting of a managed node group).</p>
+
+<h2>Updating: node by node</h2>
+
+<p>A DaemonSet has two update strategies. <code>RollingUpdate</code>, the default, replaces old Pods automatically "in a controlled fashion"; <code>OnDelete</code> creates the new Pod on a node only after you delete the old one by hand.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/#daemonset-update-strategy">[5]</a></sup> <code>maxUnavailable</code> (default 1) sets how many nodes may be without a ready Pod during the update; <code>maxSurge</code> (default 0) lets the new Pod start before the old one stops.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/#performing-a-rolling-update">[5]</a></sup> Changing node labels also changes the Pods: the DaemonSet "will promptly add Pods to newly matching nodes and delete Pods from newly not-matching nodes."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#updating-a-daemonset">[6]</a></sup></p>
+
+<h2>Demo</h2>
+
+<p class="meta">Outputs below come from the course EKS cluster (2 worker nodes). Your node names, Pod names and IPs will differ.</p>
+
+<h3>DaemonSets you already run</h3>
+<ol class="steps">
+<li>
+<pre class="cmd">kubectl get daemonsets -A</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>NAMESPACE     NAME                     DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+kube-system   aws-node                 2         2         2       2            2           &lt;none&gt;          25m
+kube-system   eks-pod-identity-agent   2         2         2       2            2           &lt;none&gt;          26m
+kube-system   kube-proxy               2         2         2       2            2           &lt;none&gt;          23m</pre>
+  </details>
+  <p><code>DESIRED</code> = number of eligible nodes. Our EKS cluster has 2 worker nodes, so each of <code>aws-node</code>, <code>eks-pod-identity-agent</code> and <code>kube-proxy</code> runs 2 Pods (see the <code>aws-node</code> check in <a href="0004-network-policies.html">lesson 04</a>).</p>
+</li>
+</ol>
+
+<h3>Simulate a dedicated node pool</h3>
+<ol class="steps" start="2">
+<li>
+  <p>List the nodes, then taint the second one. Now it acts like a node reserved for infrastructure: normal Pods stay away.</p>
+<pre class="cmd">kubectl get nodes
+kubectl taint node ip-10-0-37-66.eu-central-1.compute.internal dedicated=infra:NoSchedule</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>ip-10-0-37-66.eu-central-1.compute.internal</code> is a node of the course cluster — use yours (take the second name from <code>kubectl get nodes</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>NAME                                           STATUS   ROLES    AGE   VERSION
+ip-10-0-27-107.eu-central-1.compute.internal   Ready    &lt;none&gt;   24m   v1.37.1-eks-117f323
+ip-10-0-37-66.eu-central-1.compute.internal    Ready    &lt;none&gt;   24m   v1.37.1-eks-117f323
+node/ip-10-0-37-66.eu-central-1.compute.internal tainted</pre>
+  </details>
+</li>
+</ol>
+
+<h3>One Pod per node</h3>
+<ol class="steps" start="3">
+<li>
+  <p><a href="../examples/daemonsets/01-node-agent.yaml"><code>01-node-agent.yaml</code></a>: a tiny agent that prints the name of its node, read with the Downward API (<code>fieldPath: spec.nodeName</code>).</p>
+<pre class="file">apiVersion: apps/v1
+kind: DaemonSet                 # no replicas field: the nodes decide
+metadata:
+  name: node-agent
+  namespace: demo
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-agent
+    spec:
+      containers:
+      - name: agent
+        image: busybox:1.37
+        command: ["sh", "-c", "while true; do echo \"agent v1 on node $NODE_NAME\"; sleep 30; done"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 32Mi}</pre>
+<pre class="cmd">kubectl apply -f examples/daemonsets/00-namespace.yaml -f examples/daemonsets/01-node-agent.yaml
+kubectl get daemonset node-agent -n demo
+kubectl get pods -n demo -o wide</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>namespace/demo unchanged
+daemonset.apps/node-agent created
+NAME         DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+node-agent   1         1         1       1            1           &lt;none&gt;          8s
+NAME               READY   STATUS    RESTARTS   AGE   IP            NODE                                           NOMINATED NODE   READINESS GATES
+node-agent-pczkl   1/1     Running   0          9s    10.0.24.219   ip-10-0-27-107.eu-central-1.compute.internal   &lt;none&gt;           &lt;none&gt;</pre>
+  </details>
+  <p>(<code>unchanged</code>: the <code>demo</code> namespace was still there from an earlier lesson; on a fresh cluster you see <code>created</code>.) Two nodes, but <code>DESIRED</code> is 1. Why?</p>
+</li>
+<li>
+<pre class="cmd">kubectl describe node ip-10-0-37-66.eu-central-1.compute.internal | grep Taints</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>ip-10-0-37-66.eu-central-1.compute.internal</code> is the node you tainted in step 2 — use yours (find it with <code>kubectl get nodes</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>Taints:             dedicated=infra:NoSchedule</pre>
+  </details>
+  <p>The second node carries our <code>dedicated=infra:NoSchedule</code> taint, and that taint is not in the automatic toleration list. <a href="../examples/daemonsets/02-node-agent-all-nodes.yaml"><code>02-node-agent-all-nodes.yaml</code></a> adds the toleration:</p>
+<pre class="file">    spec:
+      tolerations:
+      - key: dedicated
+        operator: Exists
+        effect: NoSchedule</pre>
+<pre class="cmd">kubectl apply -f examples/daemonsets/02-node-agent-all-nodes.yaml
+kubectl rollout status ds/node-agent -n demo
+kubectl get pods -n demo -o wide</pre>
+  <details class="expect"><summary>Expected output (repeated status lines trimmed)</summary>
+<pre>daemonset.apps/node-agent configured
+Waiting for daemon set "node-agent" rollout to finish: 1 out of 2 new pods have been updated...
+Waiting for daemon set "node-agent" rollout to finish: 1 of 2 updated pods are available...
+daemon set "node-agent" successfully rolled out
+NAME               READY   STATUS    RESTARTS   AGE   IP            NODE                                           NOMINATED NODE   READINESS GATES
+node-agent-j64p5   1/1     Running   0          33s   10.0.41.55    ip-10-0-37-66.eu-central-1.compute.internal    &lt;none&gt;           &lt;none&gt;
+node-agent-zvmzq   1/1     Running   0          1s    10.0.17.199   ip-10-0-27-107.eu-central-1.compute.internal   &lt;none&gt;           &lt;none&gt;</pre>
+  </details>
+  <p>Now 2 of 2. The tainted node got its Pod, and changing the template also replaced the old Pod on the other node (a rolling update).</p>
+</li>
+<li>
+  <p>Look at the tolerations Kubernetes added on top of ours (use a Pod name from your output):</p>
+<pre class="cmd">kubectl get pod -n demo node-agent-j64p5 -o jsonpath='{.spec.tolerations}'</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>node-agent-j64p5</code> is a Pod name from the course run — use yours (find it with <code>kubectl get pods -n demo</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>[{"effect":"NoSchedule","key":"dedicated","operator":"Exists"},{"effect":"NoExecute","key":"node.kubernetes.io/not-ready","operator":"Exists"},{"effect":"NoExecute","key":"node.kubernetes.io/unreachable","operator":"Exists"},{"effect":"NoSchedule","key":"node.kubernetes.io/disk-pressure","operator":"Exists"},{"effect":"NoSchedule","key":"node.kubernetes.io/memory-pressure","operator":"Exists"},{"effect":"NoSchedule","key":"node.kubernetes.io/pid-pressure","operator":"Exists"},{"effect":"NoSchedule","key":"node.kubernetes.io/unschedulable","operator":"Exists"}]</pre>
+  </details>
+  <p>First ours (<code>dedicated</code>), then the six automatic ones from the table in the docs.</p>
+</li>
+<li>
+  <p>Delete one Pod: the DaemonSet puts a new one on <em>the same node</em>.</p>
+<pre class="cmd">kubectl delete pod -n demo node-agent-j64p5
+kubectl get pods -n demo -o wide</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>node-agent-j64p5</code> is a Pod name from the course run — use yours (find it with <code>kubectl get pods -n demo</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>pod "node-agent-j64p5" deleted from demo namespace
+NAME               READY   STATUS    RESTARTS   AGE   IP            NODE                                           NOMINATED NODE   READINESS GATES
+node-agent-pbjnq   1/1     Running   0          2s    10.0.43.39    ip-10-0-37-66.eu-central-1.compute.internal    &lt;none&gt;           &lt;none&gt;
+node-agent-zvmzq   1/1     Running   0          35s   10.0.17.199   ip-10-0-27-107.eu-central-1.compute.internal   &lt;none&gt;           &lt;none&gt;</pre>
+  </details>
+</li>
+</ol>
+
+<h3>Roll out version 2, node by node</h3>
+<ol class="steps" start="7">
+<li>
+  <p><a href="../examples/daemonsets/03-node-agent-v2.yaml"><code>03-node-agent-v2.yaml</code></a> changes only the message to <code>agent v2</code>.</p>
+<pre class="cmd">kubectl apply -f examples/daemonsets/03-node-agent-v2.yaml
+kubectl rollout status ds/node-agent -n demo
+kubectl rollout history ds/node-agent -n demo
+kubectl logs -n demo -l app.kubernetes.io/name=node-agent --prefix --tail=1</pre>
+  <details class="expect"><summary>Expected output (repeated status lines trimmed)</summary>
+<pre>daemonset.apps/node-agent configured
+Waiting for daemon set "node-agent" rollout to finish: 0 out of 2 new pods have been updated...
+Waiting for daemon set "node-agent" rollout to finish: 1 out of 2 new pods have been updated...
+Waiting for daemon set "node-agent" rollout to finish: 1 of 2 updated pods are available...
+daemon set "node-agent" successfully rolled out
+daemonset.apps/node-agent
+REVISION  CHANGE-CAUSE
+1         &lt;none&gt;
+2         &lt;none&gt;
+3         &lt;none&gt;
+
+[pod/node-agent-7lx8s/agent] agent v2 on node ip-10-0-27-107.eu-central-1.compute.internal
+[pod/node-agent-99gcg/agent] agent v2 on node ip-10-0-37-66.eu-central-1.compute.internal</pre>
+  </details>
+  <p>With <code>maxUnavailable: 1</code> only one node at a time was without its agent. For a CNI or a log collector, that is the difference between a smooth upgrade and a cluster-wide outage. Undo works like for a Deployment: <code>kubectl rollout undo ds/node-agent -n demo</code>.</p>
+</li>
+</ol>
+
+<h3>Only on some nodes: follow the label</h3>
+<ol class="steps" start="8">
+<li>
+  <p><a href="../examples/daemonsets/04-log-agent-selected-nodes.yaml"><code>04-log-agent-selected-nodes.yaml</code></a> has <code>nodeSelector: {role: logging}</code>. No node has that label yet:</p>
+<pre class="cmd">kubectl apply -f examples/daemonsets/04-log-agent-selected-nodes.yaml
+kubectl get daemonset log-agent -n demo</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>daemonset.apps/log-agent created
+NAME        DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR   AGE
+log-agent   0         0         0       0            0           role=logging    0s</pre>
+  </details>
+</li>
+<li>
+  <p>Label a node, and the Pod appears. Remove the label, and it goes:</p>
+<pre class="cmd">kubectl label node ip-10-0-27-107.eu-central-1.compute.internal role=logging
+kubectl get pods -n demo -l app.kubernetes.io/name=log-agent -o wide
+kubectl label node ip-10-0-27-107.eu-central-1.compute.internal role-
+kubectl get pods -n demo -l app.kubernetes.io/name=log-agent -o wide</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>ip-10-0-27-107.eu-central-1.compute.internal</code> is a node of the course cluster — use yours (take the first name from <code>kubectl get nodes</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>node/ip-10-0-27-107.eu-central-1.compute.internal labeled
+NAME              READY   STATUS    RESTARTS   AGE   IP            NODE                                           NOMINATED NODE   READINESS GATES
+log-agent-gcdfd   1/1     Running   0          8s    10.0.17.104   ip-10-0-27-107.eu-central-1.compute.internal   &lt;none&gt;           &lt;none&gt;
+node/ip-10-0-27-107.eu-central-1.compute.internal unlabeled
+NAME              READY   STATUS        RESTARTS   AGE   IP            NODE                                           NOMINATED NODE   READINESS GATES
+log-agent-gcdfd   1/1     Terminating   0          9s    10.0.17.104   ip-10-0-27-107.eu-central-1.compute.internal   &lt;none&gt;           &lt;none&gt;</pre>
+  </details>
+  <p>Labels again decide everything, this time on <em>nodes</em>. On EKS you would put such labels on a managed node group, so every new node in it gets the agent automatically.</p>
+</li>
+<li>
+  <p>Clean up: remove the taint from step 2 (the trailing <code>-</code> deletes it), then the namespace.</p>
+<pre class="cmd">kubectl taint node ip-10-0-37-66.eu-central-1.compute.internal dedicated-
+kubectl delete namespace demo</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>ip-10-0-37-66.eu-central-1.compute.internal</code> is the node you tainted in step 2 — use yours (find it with <code>kubectl describe nodes | grep Taints</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>node/ip-10-0-37-66.eu-central-1.compute.internal untainted
+namespace "demo" deleted</pre>
+  </details>
+</li>
+</ol>
+
+<h2>Best practices</h2>
+
+<ul>
+  <li><strong>Set resource requests and limits.</strong> A DaemonSet runs on every node, so its footprint is multiplied by the node count and taken from every node's capacity.</li>
+  <li><strong>Give critical agents a high priority.</strong> If the Pod "cannot fit on the node, the default scheduler may preempt (evict) some of the existing Pods based on the priority of the new Pod"; the docs recommend a higher <code>priorityClassName</code> when it must run on each node.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#how-daemon-pods-are-scheduled">[7]</a></sup> Kubernetes ships <code>system-node-critical</code> and <code>system-cluster-critical</code> for this.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/">[8]</a></sup></li>
+  <li><strong>Treat node agents as high-risk.</strong> Many need <code>hostNetwork</code> or <code>hostPath</code> volumes to do their job, and both are forbidden by the Baseline Pod Security Standard for normal workloads.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/pod-security-standards/">[9]</a></sup> A compromised agent sits on every node. Use trusted images, a dedicated ServiceAccount with least-privilege RBAC (<a href="0002-rbac.html">lesson 02</a>), and keep them in their own namespace.</li>
+  <li><strong>Keep the default <code>RollingUpdate</code></strong> with <code>maxUnavailable: 1</code> unless you have a reason; use <code>OnDelete</code> only when you must control exactly when each node switches.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/">[5]</a></sup></li>
+  <li><strong>Prefer a DaemonSet to bare Pods or scripts on the node.</strong> It replaces Pods lost to node failure or maintenance, and you manage daemons with the same tools, logs and limits as apps.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#alternatives-to-daemonset">[10]</a></sup></li>
+</ul>
+
+<h2>Check yourself</h2>
+<p class="meta">Answer from memory first. Wrong picks explain themselves.</p>
+
+<fieldset class="quiz-q" data-answer="2">
+  <legend><span class="kind">Predict the output</span>Your cluster has 5 worker nodes and you add a sixth. How many Pods does a DaemonSet without a nodeSelector run?</legend>
+  <button class="opt" data-why="No. A DaemonSet has no replicas field; the node count decides.">five, because replicas stays fixed at five</button>
+  <button class="opt" data-why="No. Existing Pods are not moved or doubled; the new node gets its own.">ten, because each node gets two Pods</button>
+  <button class="opt" data-why="Right. As nodes are added to the cluster, Pods are added to them.">six, because the new node gets one</button>
+  <button class="opt" data-why="No. The DaemonSet controller watches nodes and acts at once, no restart needed.">five, until you restart the whole DaemonSet</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="0">
+  <legend><span class="kind">Spot the cause</span>On a self-managed cluster with 1 control-plane node and 2 workers, a DaemonSet shows <code>DESIRED 2</code>. Why?</legend>
+  <button class="opt" data-why="Right. The control-plane taint is not in the automatic list; add the toleration yourself.">the control-plane taint has no matching toleration</button>
+  <button class="opt" data-why="No. Both worker nodes are fine; the third node is the control plane.">one worker node is out of memory</button>
+  <button class="opt" data-why="No. A DaemonSet has no replicas field at all.">the replicas field was set to two</button>
+  <button class="opt" data-why="No. The selector picks Pods, not nodes; nodeSelector would pick nodes.">the selector only matches two node names</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="3">
+  <legend><span class="kind">Concept</span>Why does a DaemonSet Pod tolerate <code>node.kubernetes.io/not-ready</code> automatically?</legend>
+  <button class="opt" data-why="No. It is about scheduling onto unhealthy nodes, not about speed.">it makes the Pods start faster on nodes</button>
+  <button class="opt" data-why="No. Tolerations do not hide anything; the node stays not-ready until fixed.">it hides broken nodes from the monitoring tools</button>
+  <button class="opt" data-why="No. Tolerations do not touch the update strategy.">it lets the rolling update skip broken nodes</button>
+  <button class="opt" data-why="Right. The network plugin must start before the node can become ready.">the CNI must run before node becomes ready</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="1">
+  <legend><span class="kind">Predict the output</span>A DaemonSet has <code>nodeSelector: {role: logging}</code>. You remove that label from a node. What happens to its Pod?</legend>
+  <button class="opt" data-why="No. The controller acts on label changes right away.">it keeps running until the next rolling update</button>
+  <button class="opt" data-why="Right. Pods on newly not-matching nodes are deleted promptly.">it is deleted: the node no longer matches</button>
+  <button class="opt" data-why="No. DaemonSet Pods are tied to their node; they are never moved.">it moves to another node with the label</button>
+  <button class="opt" data-why="No. Nothing breaks; the Pod is simply removed.">it stays Pending until the label comes back</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<p class="quiz-score"></p>
+
+<h2>Go further</h2>
+
+<div class="source">
+  <strong>Read next:</strong> <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/">Kubernetes: DaemonSet</a> (about ten minutes), especially "How Daemon Pods are scheduled" and "Alternatives to DaemonSet". Then <a href="https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/">Perform a Rolling Update on a DaemonSet</a>. Keep the <a href="../reference/secrets-security-reference.html">reference sheet</a> at hand.
+</div>
+
+<p class="ask">A DaemonSet with fewer Pods than nodes, or a rollout that hangs? Ask your instructor, or your agent, with <code>kubectl get ds -o wide</code>, <code>kubectl describe ds</code> and <code>kubectl describe node</code> (look at Taints).</p>
+
+<p class="meta">Sources:
+[1] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/">Kubernetes: DaemonSet</a> ·
+[2] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#pod-selector">DaemonSet: Pod Selector</a> ·
+[3] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#running-pods-on-select-nodes">DaemonSet: Running Pods on select Nodes</a> ·
+[4] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#taints-and-tolerations">DaemonSet: Taints and tolerations</a> ·
+[5] <a href="https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/">Kubernetes: Perform a Rolling Update on a DaemonSet</a> ·
+[6] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#updating-a-daemonset">DaemonSet: Updating a DaemonSet</a> ·
+[7] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#how-daemon-pods-are-scheduled">DaemonSet: How Daemon Pods are scheduled</a> ·
+[8] <a href="https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/">Kubernetes: Pod Priority and Preemption</a> ·
+[9] <a href="https://kubernetes.io/docs/concepts/security/pod-security-standards/">Kubernetes: Pod Security Standards</a> ·
+[10] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#alternatives-to-daemonset">DaemonSet: Alternatives to DaemonSet</a>.
+Commands and outputs verified 2026-10-22 on the course EKS cluster (codecool-demo, eu-central-1, Kubernetes 1.37.1-eks, 2 × t3.large).</p>
+
+<nav class="pager"><a href="0004-network-policies.html">← previous: NetworkPolicy</a><a href="../reference/secrets-security-reference.html">reference sheet →</a></nav>
+
+</main>
+</body>
+</html>

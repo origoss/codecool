@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NetworkPolicy</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/lesson.js" defer></script>
+</head>
+<body>
+<main>
+
+<p class="crumbs">Configuration &amp; security basics · lesson 04 of 04 · about 20 minutes · instructor demo</p>
+<h1>NetworkPolicy: deny everything, then allow one path</h1>
+
+<div class="win">
+  <strong>Your win:</strong> you can write a default-deny NetworkPolicy for a namespace plus one allow rule, explain why the first curl after it fails on <em>DNS</em> rather than on the backend, and predict which <code>curl</code> succeeds and which one times out.
+</div>
+
+<p class="meta">Before this: you know Pods, Deployments, Services and labels (the Pod-to-Pod basics), and the <code>demo</code> namespace from <a href="0001-configmap-vs-secret.html">lesson 01</a>. The instructor runs the demo on the shared EKS cluster from the course folder; the files are in <code>examples/network-policies/</code>. Keep the <a href="../reference/secrets-security-reference.html">reference sheet</a> open.</p>
+
+<h2>By default, every Pod can reach every Pod</h2>
+
+<p>Kubernetes networking is flat: any Pod can open a connection to any other Pod, in any namespace, and to the outside world. Nothing is filtered until you say so.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html">[2]</a></sup> In Kubernetes words, a Pod is <strong>non-isolated</strong> for ingress (incoming) and for egress (outgoing) traffic: all connections are allowed.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#the-two-sorts-of-pod-isolation">[1]</a></sup></p>
+
+<p>That is convenient on day one and dangerous on day two hundred: one compromised Pod can scan and reach your database, your internal admin APIs, and the cloud metadata endpoint. A <strong>NetworkPolicy</strong> is a namespaced object that controls traffic at the IP address and port level, OSI layer 3 and 4.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/">[1]</a></sup></p>
+
+<h2>No enforcing CNI, no effect</h2>
+
+<p>The API server stores a NetworkPolicy like any other object, but it does not filter a single packet. The <strong>network plugin</strong> (CNI) does that. In the docs' own words: "Creating a NetworkPolicy resource without a controller that implements it will have no effect."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#prerequisites">[1]</a></sup> No error, no warning: the policy just sits there.</p>
+
+<table>
+  <thead><tr><th>Where</th><th>Who enforces NetworkPolicy</th></tr></thead>
+  <tbody>
+    <tr><td>EKS (our cluster)</td><td>Amazon VPC CNI, with network policy <strong>turned on</strong>: add-on setting <code>"enableNetworkPolicy": "true"</code>. A second container, the network policy agent, then runs in every <code>aws-node</code> Pod and enforces rules with eBPF.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy-configure.html">[3]</a></sup> Linux EC2 nodes only: not Fargate, not Windows.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html#cni-network-policy-considerations">[2]</a></sup></td></tr>
+    <tr><td>Elsewhere</td><td>A CNI that implements it, typically Calico<sup class="cite"><a href="https://docs.tigera.io/calico/latest/network-policy/get-started/kubernetes-policy/kubernetes-network-policy">[4]</a></sup> or Cilium.<sup class="cite"><a href="https://docs.cilium.io/en/stable/security/policy/">[5]</a></sup> Both also have their own richer policy types; this lesson uses only the standard one.</td></tr>
+  </tbody>
+</table>
+
+<div class="source">
+  <strong>Learn Calico properly:</strong> Calico is a network plugin that enforces Kubernetes NetworkPolicy, and adds its own richer policy types.<sup class="cite"><a href="https://docs.tigera.io/calico/latest/network-policy/get-started/kubernetes-policy/kubernetes-network-policy">[4]</a></sup> Tigera, the company behind it, offers a <a href="https://apps.academy.tigera.io/learning/course/course-v1:tigera+CCO-L1+CCO-L1-2021/home">free course (Tigera Academy, CCO-L1)</a> on Kubernetes networking and network policy with Calico.<sup class="cite"><a href="https://apps.academy.tigera.io/learning/course/course-v1:tigera+CCO-L1+CCO-L1-2021/home">[12]</a></sup> It is the recommended next step after this lesson.
+</div>
+
+<p>Check it before you trust it. On EKS, enforcement is on when every <code>aws-node</code> Pod has <strong>two</strong> containers:<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy-configure.html#cni-network-policy-setup-procedure-confirm">[3]</a></sup></p>
+<pre class="cmd">kubectl get pods -n kube-system -l k8s-app=aws-node</pre>
+<details class="expect"><summary>Expected output (your node names differ)</summary>
+<pre>NAME             READY   STATUS    RESTARTS   AGE
+aws-node-fmlz2   2/2     Running   0          10m
+aws-node-rhw55   2/2     Running   0          10m</pre>
+</details>
+
+<h2>Anatomy: whom it applies to, whom it lets in</h2>
+
+<p>A policy has two halves. <code>spec.podSelector</code> picks the Pods the policy <em>applies to</em>, in its own namespace; <code>{}</code> means all of them. The rules then list who may talk to those Pods (<code>ingress</code> &rarr; <code>from</code>) and whom they may talk to (<code>egress</code> &rarr; <code>to</code>), optionally with <code>ports</code>.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-resource">[1]</a></sup></p>
+
+<p><code>policyTypes</code> says which directions the policy isolates. If you leave it out, <code>Ingress</code> is always set and <code>Egress</code> only when the policy has egress rules.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#networkpolicy-resource">[1]</a></sup> Write it out every time: it makes intent readable.</p>
+
+<p>Inside <code>from</code> and <code>to</code> you pick peers with four kinds of selector:<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#behavior-of-to-and-from-selectors">[1]</a></sup></p>
+
+<table>
+  <thead><tr><th>Selector</th><th>Selects</th></tr></thead>
+  <tbody>
+    <tr><td><code>podSelector</code></td><td>Pods with these labels, in the <strong>same namespace</strong> as the policy.</td></tr>
+    <tr><td><code>namespaceSelector</code></td><td><strong>All</strong> Pods in namespaces with these labels. Every namespace has the automatic label <code>kubernetes.io/metadata.name: &lt;name&gt;</code>, so you can select one by name.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/">[6]</a></sup></td></tr>
+    <tr><td>both, in <strong>one</strong> entry</td><td>Pods with these labels, inside namespaces with those labels (AND).</td></tr>
+    <tr><td><code>ipBlock</code></td><td>A CIDR range. Meant for addresses outside the cluster, because Pod IPs change.</td></tr>
+  </tbody>
+</table>
+
+<h2>Policies only ever add allows</h2>
+
+<p>There is no "deny" rule in a NetworkPolicy. As soon as <em>any</em> policy selects a Pod for a direction, that Pod is isolated in that direction, and what is allowed is the <strong>union</strong> of all rules of all policies that select it. Policies never conflict and their order does not matter.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#the-two-sorts-of-pod-isolation">[1]</a></sup></p>
+
+<p>And a connection needs <strong>both ends</strong>: the egress side of the source Pod and the ingress side of the destination Pod must both allow it.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#the-two-sorts-of-pod-isolation">[1]</a></sup> So "deny everything, then allow frontend &rarr; backend" takes two allow rules, one on each side.</p>
+
+<p class="note">Within one rule, peers and ports go together. A rule "from <code>app=frontend</code>, port 8080" plus another rule "from <code>app=metrics</code>, port 9090" does <em>not</em> let the frontend in on 9090.</p>
+
+<h2>The YAML trap: one dash turns AND into OR</h2>
+
+<p>These two snippets differ by one character. The docs warn: "Be careful to use correct YAML syntax."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#behavior-of-to-and-from-selectors">[1]</a></sup></p>
+
+<div class="filename">AND: one list item, both selectors (what you usually want)</div>
+<pre class="file">egress:
+  - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns</pre>
+
+<div class="filename">OR: two list items (note the second "-")</div>
+<pre class="file">egress:
+  - to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+      - podSelector:
+          matchLabels:
+            k8s-app: kube-dns</pre>
+
+<p>The first allows "CoreDNS Pods in <code>kube-system</code>". The second allows "<strong>any</strong> Pod in <code>kube-system</code>" <em>or</em> "Pods labelled <code>k8s-app=kube-dns</code> in <em>this</em> namespace". Both are valid YAML, both are accepted. When in doubt, <code>kubectl describe</code> shows how Kubernetes read it: one <code>To:</code> block means AND, two mean OR (step 7 below).<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#behavior-of-to-and-from-selectors">[1]</a></sup></p>
+
+<h2>Do it</h2>
+
+<p>Two apps in <code>demo</code>: <code>backend</code> (nginx on port 8080, behind a Service named <code>backend</code>) and <code>frontend</code> (a Pod with <code>curl</code>). Every <code>curl</code> uses <code>-m 3</code>: a blocked packet is <em>dropped</em>, not refused, so without a timeout you would just wait.</p>
+
+<ol class="steps">
+<li>
+  <p>Deploy both apps. They are Deployments, not bare Pods, on purpose: on EKS, enforcement is reliable only for Pods that have an owner such as a Deployment.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html#cni-network-policy-considerations">[2]</a></sup> The Service port equals the container port (8080), which the VPC CNI also requires.</p>
+  <div class="filename">examples/network-policies/01-apps.yaml (labels are the part that matters)</div>
+<pre class="file">kind: Deployment       # backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    ...
+kind: Service          # backend:8080 -&gt; Pods with app=backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+...
+kind: Deployment       # frontend
+  template:
+    metadata:
+      labels:
+        app: frontend</pre>
+<pre class="cmd">kubectl apply -f examples/network-policies/00-namespace.yaml -f examples/network-policies/01-apps.yaml</pre>
+<pre class="cmd">kubectl -n demo get pods -l 'app in (frontend,backend)'</pre>
+  <details class="expect"><summary>Expected output (hash suffixes differ)</summary>
+<pre>namespace/demo unchanged
+deployment.apps/backend created
+service/backend created
+deployment.apps/frontend created
+NAME                       READY   STATUS    RESTARTS   AGE
+backend-6b654f876c-54z9z   1/1     Running   0          5s
+frontend-59c55749f-lcn64   1/1     Running   0          5s</pre>
+  </details>
+</li>
+
+<li>
+  <p><strong>Before:</strong> the frontend reaches the backend, and so does a throwaway test Pod with no labels. Default allow-all.</p>
+<pre class="cmd">kubectl -n demo exec deploy/frontend -- curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080</pre>
+<pre class="cmd">kubectl -n demo run tester --rm -i --restart=Never --image=curlimages/curl:8.11.1 -- sh -c "sleep 5; curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080"</pre>
+  <details class="expect"><summary>Expected output (trimmed)</summary>
+<pre>200
+...
+200
+pod "tester" deleted from demo namespace</pre>
+  </details>
+  <p class="note">Why <code>sleep 5</code> in the test Pod? By default the VPC CNI starts a new Pod with allow-all and applies its policies a moment later ("standard mode").<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy-configure.html#cni-network-policy-configure-policy">[3]</a></sup> A test that fires in the first second can pass when it should fail.</p>
+</li>
+
+<li>
+  <p>Deny everything, both directions, for every Pod in <code>demo</code>. The policy has no rules at all, so nothing is allowed.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#default-deny-all-ingress-and-all-egress-traffic">[1]</a></sup></p>
+  <div class="filename">examples/network-policies/02-default-deny.yaml</div>
+<pre class="file">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress</pre>
+<pre class="cmd">kubectl apply -f examples/network-policies/02-default-deny.yaml</pre>
+<pre class="cmd">kubectl -n demo exec deploy/frontend -- curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>networkpolicy.networking.k8s.io/default-deny-all created
+000
+curl: (28) Resolving timed out after 3001 milliseconds
+command terminated with exit code 28</pre>
+  </details>
+  <p>Read the error closely: curl never got to the backend. It could not even <em>resolve</em> the name <code>backend</code>.</p>
+</li>
+
+<li>
+  <p>Allow frontend &rarr; backend on TCP 8080, on both ends: ingress on the backend, egress on the frontend.</p>
+  <div class="filename">examples/network-policies/03-allow-frontend-to-backend.yaml</div>
+<pre class="file">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-allow-from-frontend
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: backend          # applies TO the backend Pods
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: frontend # only from frontend Pods in this namespace
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: frontend-allow-to-backend
+  namespace: demo
+spec:
+  podSelector:
+    matchLabels:
+      app: frontend
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: backend
+      ports:
+        - protocol: TCP
+          port: 8080</pre>
+<pre class="cmd">kubectl apply -f examples/network-policies/03-allow-frontend-to-backend.yaml</pre>
+<pre class="cmd">kubectl -n demo exec deploy/frontend -- curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080</pre>
+<pre class="cmd">kubectl -n demo get svc backend -o jsonpath='{.spec.clusterIP}{"\n"}'</pre>
+<pre class="cmd">kubectl -n demo exec deploy/frontend -- curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://172.20.155.41:8080</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>172.20.155.41</code> is the ClusterIP of the <code>backend</code> Service on our cluster — use yours (find it with the <code>jsonpath</code> command just above).</p>
+  <details class="expect"><summary>Expected output (use your own ClusterIP)</summary>
+<pre>networkpolicy.networking.k8s.io/backend-allow-from-frontend created
+networkpolicy.networking.k8s.io/frontend-allow-to-backend created
+000
+curl: (28) Resolving timed out after 3000 milliseconds
+command terminated with exit code 28
+172.20.155.41
+200</pre>
+  </details>
+  <p>By IP it works; by name it does not. The allow rule is right. <strong>DNS is blocked</strong>: name lookups go to CoreDNS in <code>kube-system</code> on port 53, and default-deny egress blocked that too.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#default-deny-all-ingress-and-all-egress-traffic">[1]</a></sup> This is the classic outage after someone "just adds a default deny".</p>
+</li>
+
+<li>
+  <p>Allow DNS egress for every Pod in <code>demo</code>, to the CoreDNS Pods only. The CoreDNS Service is still called <code>kube-dns</code> and its Pods carry <code>k8s-app=kube-dns</code>, for backward compatibility.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/">[7]</a></sup> DNS uses UDP <em>and</em> TCP 53.</p>
+  <div class="filename">examples/network-policies/04-allow-dns.yaml</div>
+<pre class="file">apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:          # no "-" here: same item, so AND
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53</pre>
+<pre class="cmd">kubectl apply -f examples/network-policies/04-allow-dns.yaml</pre>
+<pre class="cmd">kubectl -n demo exec deploy/frontend -- curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>networkpolicy.networking.k8s.io/allow-dns-egress created
+200</pre>
+  </details>
+</li>
+
+<li>
+  <p><strong>After:</strong> test from the outside with an ephemeral Pod. Without the <code>app=frontend</code> label it is just another Pod in <code>demo</code>: DNS works now, but the connection itself is dropped. Then give it the frontend label and it gets in.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/administer-cluster/declare-network-policy/">[8]</a></sup></p>
+<pre class="cmd">kubectl -n demo run tester --rm -i --restart=Never --image=curlimages/curl:8.11.1 -- sh -c "sleep 5; curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080"</pre>
+<pre class="cmd">kubectl -n demo run tester --rm -i --restart=Never --labels=app=frontend --image=curlimages/curl:8.11.1 -- sh -c "sleep 5; curl -sS -m 3 -o /dev/null -w '%{http_code}\n' http://backend:8080"</pre>
+  <details class="expect"><summary>Expected output (trimmed)</summary>
+<pre>curl: (28) Connection timed out after 3002 milliseconds
+000
+pod "tester" deleted from demo namespace
+pod demo/tester terminated (Error)
+...
+200
+pod "tester" deleted from demo namespace</pre>
+  </details>
+  <p>Compare the two errors: <code>Resolving timed out</code> (step 3) means DNS is blocked; <code>Connection timed out</code> means the target port is blocked.</p>
+  <p class="note">The second test also shows why labels <em>are</em> the security boundary: anyone who may create Pods in <code>demo</code> with <code>app=frontend</code> gets the frontend's network access. RBAC on Pod creation (<a href="0002-rbac.html">lesson 02</a>) and NetworkPolicy work together.</p>
+</li>
+
+<li>
+  <p>See the trap with your own eyes. <code>05-trap-or.yaml</code> is <code>04</code> with one extra <code>-</code>. Apply it, read how Kubernetes understood both, then delete it.</p>
+<pre class="cmd">kubectl apply -f examples/network-policies/05-trap-or.yaml</pre>
+<pre class="cmd">kubectl -n demo describe networkpolicy allow-dns-egress trap-or</pre>
+<pre class="cmd">kubectl delete -f examples/network-policies/05-trap-or.yaml</pre>
+  <details class="expect"><summary>Expected output (trimmed)</summary>
+<pre>networkpolicy.networking.k8s.io/trap-or created
+Name:         allow-dns-egress
+Namespace:    demo
+...
+  Allowing egress traffic:
+    To Port: 53/UDP
+    To Port: 53/TCP
+    To:
+      NamespaceSelector: kubernetes.io/metadata.name=kube-system
+      PodSelector: k8s-app=kube-dns
+  Policy Types: Egress
+
+Name:         trap-or
+Namespace:    demo
+...
+  Allowing egress traffic:
+    To Port: 53/UDP
+    To Port: 53/TCP
+    To:
+      NamespaceSelector: kubernetes.io/metadata.name=kube-system
+    To:
+      PodSelector: k8s-app=kube-dns
+  Policy Types: Egress
+networkpolicy.networking.k8s.io "trap-or" deleted from demo namespace</pre>
+  </details>
+  <p>One <code>To:</code> with two selectors is AND. Two <code>To:</code> blocks are OR: the trap opens port 53 to <em>every</em> Pod in <code>kube-system</code>.</p>
+</li>
+
+<li>
+  <p>Clean up, so the next demo in <code>demo</code> is not silently cut off.</p>
+<pre class="cmd">kubectl get networkpolicy -n demo</pre>
+<pre class="cmd">kubectl delete -f examples/network-policies/02-default-deny.yaml -f examples/network-policies/03-allow-frontend-to-backend.yaml -f examples/network-policies/04-allow-dns.yaml -f examples/network-policies/01-apps.yaml</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>NAME                          POD-SELECTOR   AGE
+allow-dns-egress              &lt;none&gt;         27s
+backend-allow-from-frontend   app=backend    38s
+default-deny-all              &lt;none&gt;         47s
+frontend-allow-to-backend     app=frontend   38s
+networkpolicy.networking.k8s.io "default-deny-all" deleted from demo namespace
+networkpolicy.networking.k8s.io "backend-allow-from-frontend" deleted from demo namespace
+networkpolicy.networking.k8s.io "frontend-allow-to-backend" deleted from demo namespace
+networkpolicy.networking.k8s.io "allow-dns-egress" deleted from demo namespace
+deployment.apps "backend" deleted from demo namespace
+service "backend" deleted from demo namespace
+deployment.apps "frontend" deleted from demo namespace</pre>
+  </details>
+</li>
+</ol>
+
+<h2>Two recipes from the community cookbook</h2>
+
+<p><a href="https://github.com/ahmetb/kubernetes-network-policy-recipes">Kubernetes Network Policy Recipes</a> is a widely used collection of ready-made policies, each with a use case, the YAML and a way to try it.<sup class="cite"><a href="https://github.com/ahmetb/kubernetes-network-policy-recipes">[9]</a></sup> Before you write a policy from scratch, look there. Two recipes that go beyond today's demo:</p>
+
+<h3>Recipe 04: deny all traffic from other namespaces</h3>
+
+<p>Use case: Pods in <code>test</code> must never reach the database in <code>prod</code>; or each customer has a namespace, and namespaces must not talk to each other.<sup class="cite"><a href="https://github.com/ahmetb/kubernetes-network-policy-recipes/blob/master/04-deny-traffic-from-other-namespaces.md">[10]</a></sup></p>
+<pre class="file">kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  namespace: demo
+  name: deny-from-other-namespaces
+spec:
+  podSelector: {}          # applies to ALL Pods in demo
+  ingress:
+  - from:
+    - podSelector: {}      # from ALL Pods, and with no namespaceSelector: only this namespace</pre>
+<p class="meta">File: <a href="../examples/network-policies/06-recipe-deny-from-other-namespaces.yaml"><code>06-recipe-deny-from-other-namespaces.yaml</code></a> (the recipe uses namespace <code>default</code>; here <code>demo</code>).</p>
+<pre class="cmd">kubectl create namespace foo
+kubectl run web -n demo --image=nginx:1.27-alpine --labels=app=web --expose --port=80
+kubectl apply -f examples/network-policies/06-recipe-deny-from-other-namespaces.yaml
+kubectl run test -n foo --rm -i --restart=Never --image=curlimages/curl:8.11.1 --command -- sh -c 'sleep 5; curl -sS -m 3 -o /dev/null -w "%{http_code}\n" http://web.demo'
+kubectl run test -n demo --rm -i --restart=Never --image=curlimages/curl:8.11.1 --command -- sh -c 'sleep 5; curl -sS -m 3 -o /dev/null -w "%{http_code}\n" http://web.demo'</pre>
+<details class="expect"><summary>Expected output (the two test runs)</summary>
+<pre># from namespace foo: blocked
+curl: (28) Connection timed out after 3002 milliseconds
+000
+# from namespace demo: allowed
+200</pre>
+</details>
+<p class="meta"><code>sleep 5</code> waits out the short window in which a brand-new Pod is not yet isolated (see the <code>sleep 5</code> note in the demo above).</p>
+<p>The key is a <code>podSelector</code> <em>without</em> a <code>namespaceSelector</code>: it only ever matches Pods in the policy's own namespace.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#behavior-of-to-and-from-selectors">[1]</a></sup></p>
+
+<h3>Recipe 14: deny external egress, and a trap in it</h3>
+
+<p>Use case: an app may talk to the cluster but must never open connections to the internet (data exfiltration, unexpected downloads).<sup class="cite"><a href="https://github.com/ahmetb/kubernetes-network-policy-recipes/blob/master/14-deny-external-egress-traffic.md">[11]</a></sup> The recipe as published allows only DNS to kube-dns:</p>
+<pre class="file">spec:
+  podSelector:
+    matchLabels:
+      app: foo
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+      - port: 53
+        protocol: UDP
+      - port: 53
+        protocol: TCP</pre>
+<p>The recipe says the Pod can still reach the in-cluster <code>web</code> Service. We tested it (<a href="../examples/network-policies/07-recipe-deny-external-egress.yaml"><code>07-recipe-deny-external-egress.yaml</code></a>, Pod labelled <code>app=foo</code>):</p>
+<details class="expect" open><summary>Actual output with the recipe as published</summary>
+<pre>web: curl: (28) Connection timed out after 3002 milliseconds
+000
+example.com: 000
+curl: (28) Connection timed out after 3000 milliseconds</pre>
+</details>
+<p><strong>Both are blocked.</strong> Egress is an allow-list: only what is listed is allowed, and only DNS is listed. To keep in-cluster traffic, add one more rule: <code>namespaceSelector: {}</code> selects every Pod in every namespace, but never an IP outside the cluster (<a href="../examples/network-policies/08-recipe-deny-external-egress-fixed.yaml"><code>08-recipe-deny-external-egress-fixed.yaml</code></a>):</p>
+<pre class="file">  egress:
+  - to: ...                 # the DNS rule, unchanged
+  - to:
+    - namespaceSelector: {}   # any Pod in the cluster</pre>
+<details class="expect" open><summary>Output with the fix</summary>
+<pre>web: 200
+example.com: curl: (28) Connection timed out after 3001 milliseconds
+000</pre>
+</details>
+<p class="note"><strong>The lesson behind the trap:</strong> a recipe from a trusted repository is still only a starting point. Test what must work <em>and</em> what must fail before you ship it.</p>
+
+<h2>Industry practice</h2>
+
+<ul>
+  <li><strong>Default deny per namespace, from day one.</strong> Ship <code>default-deny-all</code> plus <code>allow-dns-egress</code> with every new namespace, then add one small allow policy per real flow. NetworkPolicy has no cluster-wide default of its own.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#what-you-can-t-do-with-network-policies-at-least-not-yet">[1]</a></sup></li>
+  <li><strong>Label hygiene.</strong> Policies select by labels, so labels are now a security control. Use a few stable, meaningful labels (<code>app</code>, <code>tier</code>), never select on <code>pod-template-hash</code>, and review label changes like firewall changes.</li>
+  <li><strong>Test with an ephemeral curl Pod, always with a timeout.</strong> Test both what must work and what must <em>not</em> work, using <code>kubectl run --rm</code> with and without the expected labels.</li>
+  <li><strong>Know the limit: L3/L4 only.</strong> A NetworkPolicy sees IPs, ports and protocols. It cannot allow "only <code>GET /api</code>", cannot do anything with TLS, and cannot target a Service by name.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/#what-you-can-t-do-with-network-policies-at-least-not-yet">[1]</a></sup> HTTP-level rules need a service mesh, a gateway or a CNI extension such as Cilium's own policy type.</li>
+</ul>
+
+<p class="warn"><strong>Before you add a default deny on EKS:</strong> it blocks DNS (step 4) and also the EC2 instance metadata service. Pods that use EKS Pod Identity or IRSA, like the External Secrets Operator in <a href="0003-external-secrets-aws.html">lesson 03</a>, do not use IMDS; every other destination a Pod needs (AWS APIs, an external database) needs its own egress allow.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html#cni-network-policy-considerations">[2]</a></sup> Roll out deny policies namespace by namespace and watch for timeouts.</p>
+
+<p class="warn"><strong>Not every timeout is a NetworkPolicy.</strong> On our cluster, the first run of the recipes timed out on port 80 between Pods on different nodes with no policy at all: the EKS node security group only allowed node-to-node ports 1025&ndash;65535 (fixed in <code>infra/main.tf</code>, <code>node_security_group_additional_rules</code>, rule <code>ingress_self_all</code>). Check <code>kubectl get networkpolicy -A</code> first; if there is none and it still times out, look at the security groups.</p>
+
+<h2>Check yourself</h2>
+<p class="meta">Answer from memory first. Wrong picks explain themselves.</p>
+
+<fieldset class="quiz-q" data-answer="1">
+  <legend><span class="kind">Predict the output</span>Namespace <code>demo</code> has <code>default-deny-all</code> and both frontend&rarr;backend allow policies, but no DNS policy. What does <code>curl -m 3 http://backend:8080</code> from the frontend do?</legend>
+  <button class="opt" data-why="No. The rule for port 8080 is fine, but curl must first look up the name, and that goes to CoreDNS on port 53.">Works, because the frontend-to-backend rule allows it</button>
+  <button class="opt" data-why="Right. Default-deny egress also blocks port 53 to CoreDNS: curl: (28) Resolving timed out. By ClusterIP it would work.">Times out resolving name: DNS egress blocked</button>
+  <button class="opt" data-why="No. A blocked packet is dropped, not refused, so you see a timeout. And the backend ingress rule does allow the frontend.">Connection refused, because backend ingress rejects it</button>
+  <button class="opt" data-why="No. NetworkPolicy has no error responses. Blocked traffic is silently dropped, which is why every test needs a timeout.">Fails at once with a policy error</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="3">
+  <legend><span class="kind">Spot the bug</span>This ingress rule is on the backend, in namespace <code>demo</code>. Who may connect?</legend>
+<pre>ingress:
+  - from:
+      - namespaceSelector:
+          matchLabels:
+            team: ops
+      - podSelector:
+          matchLabels:
+            role: monitor</pre>
+  <button class="opt" data-why="No. That would need both selectors in ONE list item. The second dash makes two separate peers.">Only monitor Pods that run in ops namespaces</button>
+  <button class="opt" data-why="No. A podSelector on its own only looks in the policy's own namespace, here demo.">Monitor Pods in any namespace, ops or not</button>
+  <button class="opt" data-why="No. Both forms are valid YAML and valid NetworkPolicy. That is exactly what makes the trap dangerous.">Nobody, because the API server rejects this YAML</button>
+  <button class="opt" data-why="Right. Two list items are OR: every Pod in namespaces labelled team=ops, or Pods labelled role=monitor in demo.">Any ops-namespace Pod, plus monitor Pods in demo</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="0">
+  <legend><span class="kind">Predict the output</span>A cluster's CNI does not implement NetworkPolicy. You apply <code>default-deny-all</code> to <code>demo</code>, then curl frontend &rarr; backend. Result?</legend>
+  <button class="opt" data-why="Right. The API server stores the object, but nothing filters packets. No warning either, so check your CNI first.">Still 200: the policy is stored, never enforced</button>
+  <button class="opt" data-why="No. The API server does not know or check which CNI you run. The object is accepted.">kubectl apply fails: no plugin can enforce it</button>
+  <button class="opt" data-why="No. The API server never sits in the data path between Pods. Only the network plugin can drop packets.">Times out: the API server drops the packets</button>
+  <button class="opt" data-why="No. kube-proxy handles Service load balancing, not NetworkPolicy. There is no fallback.">Times out: kube-proxy falls back to blocking everything</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="2">
+  <legend><span class="kind">Predict the output</span>Two policies select the backend. Policy A allows <code>app=frontend</code> on TCP 8080. Policy B allows <code>app=metrics</code> on TCP 9090. The frontend connects to backend port 9090. Result?</legend>
+  <button class="opt" data-why="No. Policy A lets the frontend in on 8080 only. Peers and ports belong together inside one rule.">Allowed: frontend is allowed by policy A</button>
+  <button class="opt" data-why="No. Policy B opens 9090 only for metrics Pods, not for everyone.">Allowed: port 9090 is open via B</button>
+  <button class="opt" data-why="Right. The union is (frontend, 8080) plus (metrics, 9090). No rule pairs frontend with 9090.">Blocked: no rule allows frontend on 9090</button>
+  <button class="opt" data-why="No. Policies never override each other. They are additive, and their order does not matter.">Blocked: policy B overrides policy A here</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="1">
+  <legend><span class="kind">Predict the output</span><code>demo</code> has <code>default-deny-all</code>, <code>allow-dns-egress</code> and <code>backend-allow-from-frontend</code>, but <em>not</em> <code>frontend-allow-to-backend</code>. Frontend curls the backend. Result?</legend>
+  <button class="opt" data-why="No. The destination's ingress is only half. The source's egress must allow it too.">200, because backend ingress allows the frontend</button>
+  <button class="opt" data-why="Right. DNS now works, but default-deny still blocks the frontend's egress to 8080: Connection timed out.">Times out: frontend egress is still denied</button>
+  <button class="opt" data-why="No. allow-dns-egress selects every Pod in demo, including the frontend, so the name resolves.">Times out resolving the name, like before</button>
+  <button class="opt" data-why="No. Nothing is ever refused by a policy: blocked packets are dropped, so curl times out.">Refused, because ingress needs a matching egress</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="2">
+  <legend><span class="kind">Choose the tool</span>The backend should accept only <code>GET /api/orders</code> from the frontend, nothing else. What do you reach for?</legend>
+  <button class="opt" data-why="No. NetworkPolicy has no HTTP fields. It works at layers 3 and 4: IPs, ports, protocols.">A NetworkPolicy with an HTTP path</button>
+  <button class="opt" data-why="No. ipBlock is for cluster-external CIDRs, and it is still only IPs and ports.">A NetworkPolicy ipBlock on the frontend</button>
+  <button class="opt" data-why="Right. Methods and paths are layer 7: a service mesh, a gateway, or a CNI extension such as Cilium's own policies.">An L7 proxy, like a mesh</button>
+  <button class="opt" data-why="No. However many you write, NetworkPolicies never see the HTTP method.">Two NetworkPolicies: one per HTTP method</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<p class="quiz-score"></p>
+
+<h2>Go further</h2>
+
+<div class="source">
+  <strong>Read next:</strong> <a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/">Kubernetes: Network Policies</a>, the sections "The two sorts of Pod isolation", "Behavior of to and from selectors" and "Default policies" (about fifteen minutes). Then, for our platform, <a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html#cni-network-policy-considerations">the EKS considerations list</a>.
+</div>
+
+<p class="ask">Something allowed that should be blocked, or a timeout you cannot place? Ask your instructor (or your agent) with the output of <code>kubectl describe networkpolicy -n &lt;ns&gt;</code>, <code>kubectl get pods --show-labels</code>, and the exact curl error.</p>
+
+<p class="meta">Sources:
+[1] <a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/">Kubernetes: Network Policies</a> ·
+[2] <a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html">Amazon EKS: Limit Pod traffic with Kubernetes network policies</a> ·
+[3] <a href="https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy-configure.html">Amazon EKS: Restrict Pod network traffic with Kubernetes network policies</a> ·
+[4] <a href="https://docs.tigera.io/calico/latest/network-policy/get-started/kubernetes-policy/kubernetes-network-policy">Calico: Get started with Kubernetes network policy</a> ·
+[5] <a href="https://docs.cilium.io/en/stable/security/policy/">Cilium: Overview of Network Policy</a> ·
+[6] <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/">Kubernetes: Namespaces (automatic labelling)</a> ·
+[7] <a href="https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/">Kubernetes: Debugging DNS Resolution</a> ·
+[8] <a href="https://kubernetes.io/docs/tasks/administer-cluster/declare-network-policy/">Kubernetes: Declare Network Policy</a> ·
+[9] <a href="https://github.com/ahmetb/kubernetes-network-policy-recipes">Kubernetes Network Policy Recipes (ahmetb, Apache-2.0)</a> ·
+[10] <a href="https://github.com/ahmetb/kubernetes-network-policy-recipes/blob/master/04-deny-traffic-from-other-namespaces.md">Recipe 04: Deny all traffic from other namespaces</a> ·
+[11] <a href="https://github.com/ahmetb/kubernetes-network-policy-recipes/blob/master/14-deny-external-egress-traffic.md">Recipe 14: Deny external egress traffic</a> ·
+[12] <a href="https://apps.academy.tigera.io/learning/course/course-v1:tigera+CCO-L1+CCO-L1-2021/home">Tigera Academy: Calico course CCO-L1</a>.
+Commands and outputs verified 2026-10-22 on the course EKS cluster (codecool-demo, eu-central-1, Kubernetes 1.37.1-eks, 2 &times; t3.large), with the VPC CNI network policy agent enforcing NetworkPolicy.</p>
+
+<nav class="pager"><a href="0003-external-secrets-aws.html">← previous: AWS Secrets Manager + External Secrets</a><a href="0005-daemonsets.html">next: DaemonSets →</a></nav>
+
+</main>
+</body>
+</html>

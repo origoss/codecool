@@ -1,0 +1,9 @@
+# Immutable: the data can never be changed. To change it, delete and recreate (or use a new name).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config-v1
+  namespace: demo
+data:
+  LOG_LEVEL: "info"
+immutable: true

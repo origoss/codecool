@@ -1,0 +1,72 @@
+direction: down
+vars: {d2-config: {layout-engine: elk}}
+classes: {
+  allow: {style: {fill: "#e3f4e1"; stroke: "#2e7d32"}}
+  deny: {style: {fill: "#fbe3e0"; stroke: "#c62828"}}
+  token: {shape: page; style: {fill: "#fff8e1"; stroke: "#b08800"}}
+}
+
+title: |md
+  # How one Pod gets permissions in Kubernetes (RBAC) and in AWS (IAM)
+  Same ServiceAccount, two tokens, two separate authorization systems
+| {near: top-center}
+
+eks: EKS cluster {
+  style.fill: "#eef3fb"
+  ns: "namespace: demo" {
+    style.fill: "#ffffff"
+    pod: "Pod\nserviceAccountName: app" {shape: rectangle; style.stroke-width: 3}
+    sa: "ServiceAccount\napp" {shape: person}
+    tokA: "token A\naud: API server" {class: token}
+    tokB: "token B\naud: pods.eks.amazonaws.com\n+ AWS_CONTAINER_* env" {class: token}
+    rb: "RoleBinding\nsubject: SA app" {shape: hexagon}
+    role: "Role\nget, list configmaps" {shape: document}
+    pod -> sa: runs as {style.stroke-dash: 3}
+    pod -> tokA: mounted
+    pod -> tokB: mounted
+    rb -> sa: subject
+    rb -> role: roleRef
+  }
+  api: "kube-apiserver" {
+    authn: "② AuthN\nwho are you?\n→ system:serviceaccount:demo:app"
+    authz: "③ AuthZ (RBAC)\nmay you?"
+    authn -> authz
+  }
+  agent: "eks-pod-identity-agent\nDaemonSet · 169.254.170.23" {shape: cylinder}
+  ok: "④ 200 OK" {class: allow}
+  no: "④ 403 Forbidden" {class: deny}
+
+  ns.tokA -> api.authn: "① request + token A"
+  api.authz -> ns.rb: "find bindings" {style.stroke-dash: 3}
+  api.authz -> ok: rule matches
+  api.authz -> no: no rule
+  ns.tokB -> agent: "ⓐ SDK asks for credentials"
+}
+
+aws: AWS {
+  style.fill: "#fff4e5"
+  eksauth: "EKS Auth API\nAssumeRoleForPodIdentity" {
+    assoc: "ⓒ Pod Identity association\ncluster + demo + app → IAM role"
+    trust: "ⓓ trust policy\npods.eks.amazonaws.com\nsts:AssumeRole, sts:TagSession"
+    assoc -> trust
+  }
+  role: "IAM role\ncodecool-demo-…" {shape: hexagon}
+  policy: "permission policy\nsecretsmanager:GetSecretValue\non codecool/*" {shape: document}
+  creds: "temporary credentials\n+ session tags" {class: token}
+  sm: "Secrets Manager\ncodecool/app-db" {shape: cylinder}
+  iam: "ⓕ IAM evaluates policy" {shape: diamond}
+  ok: "secret value" {class: allow}
+  no: "AccessDeniedException" {class: deny}
+
+  eksauth.trust -> role
+  role -> policy: attached
+  role -> creds: issues
+  sm -> iam
+  iam -> policy: checks {style.stroke-dash: 3}
+  iam -> ok: allow
+  iam -> no: no match
+}
+
+eks.agent -> aws.eksauth.assoc: "ⓑ token B"
+aws.creds -> eks.agent: "returned to Pod SDK" {style.stroke-dash: 3}
+eks.ns.pod -> aws.sm: "ⓔ GetSecretValue\nsigned with temp creds"

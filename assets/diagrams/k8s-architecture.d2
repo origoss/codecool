@@ -1,0 +1,86 @@
+vars: {d2-config: {layout-engine: elk}}
+grid-rows: 3
+grid-gap: 80
+classes: {
+  node: {style: {fill: "#f3f8ee"; stroke: "#2e7d32"}}
+  pod: {style: {fill: "#fff8e1"; stroke: "#b08800"}}
+}
+
+title: |md
+  # How Kubernetes works: control plane and data plane
+  Every component talks only to the API server. Only the API server talks to etcd.
+| {near: top-center}
+
+you: "You / CI\nkubectl apply -f app.yaml" {shape: rectangle; style: {fill: "#e8e4f3"; stroke: "#5b3fa0"; border-radius: 8}}
+
+cp: "Control plane  (on EKS: managed by AWS)" {
+  label.near: bottom-center
+  style: {fill: "#eef3fb"; stroke: "#1f4fa3"}
+  grid-columns: 3
+  grid-gap: 120
+  ctl: "" {
+    grid-rows: 2
+    grid-gap: 40
+    style: {fill: transparent; stroke: transparent}
+    sched: "kube-scheduler\npicks a node for\neach new Pod"
+    cm: "kube-controller-manager\ncontrol loops: desired\nvs current, fix drift"
+  }
+  api: "kube-apiserver\nthe only front door\nAuthN → AuthZ (RBAC)\n→ admission" {style: {stroke-width: 4; font-size: 18}}
+  store: "" {
+    grid-rows: 2
+    grid-gap: 40
+    style: {fill: transparent; stroke: transparent}
+    etcd: "etcd\nkey-value store:\nall cluster state" {shape: cylinder}
+    ccm: "cloud-controller-manager\nload balancers, node info\n(calls AWS APIs)"
+  }
+}
+
+dp: "Data plane: worker nodes  (on EKS: EC2 in your VPC)" {
+  style: {fill: "#f7f7f2"; stroke: "#2e7d32"}
+  grid-columns: 2
+  grid-gap: 40
+  n1: "Node 1" {
+    class: node
+    grid-rows: 2
+    grid-gap: 20
+    agents: "" {
+      grid-columns: 3
+      style: {fill: transparent; stroke: transparent}
+      kubelet: "kubelet\nstarts Pods via\ncontainerd, reports status"
+      proxy: "kube-proxy\nService → Pod rules"
+      cni: "CNI (VPC CNI)\nPod IPs +\nNetworkPolicy"
+    }
+    pods: "" {
+      grid-columns: 2
+      style: {fill: transparent; stroke: transparent}
+      p1: "Pod" {class: pod}
+      p2: "Pod" {class: pod}
+    }
+  }
+  n2: "Node 2" {
+    class: node
+    grid-rows: 2
+    grid-gap: 20
+    agents: "" {
+      grid-columns: 3
+      style: {fill: transparent; stroke: transparent}
+      kubelet: "kubelet"
+      proxy: "kube-proxy"
+      cni: "CNI"
+    }
+    pods: "" {
+      grid-columns: 2
+      style: {fill: transparent; stroke: transparent}
+      p3: "Pod" {class: pod}
+      p4: "Pod" {class: pod}
+    }
+  }
+}
+
+you -> cp.api: "① write desired state"
+cp.api -> cp.store.etcd: "② persist"
+cp.ctl.sched -> cp.api: "③ watch"
+cp.ctl.cm -> cp.api: "watch"
+cp.store.ccm -> cp.api: "watch"
+dp.n1.agents.kubelet -> cp.api: "④ watch my Pods\n⑤ report status"
+dp.n2.agents.kubelet -> cp.api

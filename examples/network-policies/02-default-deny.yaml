@@ -1,0 +1,12 @@
+# Every Pod in demo (podSelector: {}) becomes isolated for BOTH directions.
+# No ingress/egress rules = nothing is allowed. Allow rules are added on top, one policy each.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

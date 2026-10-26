@@ -1,0 +1,40 @@
+# Lesson 00: BROKEN on purpose. Template label app: demo-ap does not match the selector.
+apiVersion: apps/v1          # (1) API group/version
+kind: Deployment             # (2) object type
+metadata:                    # (3) identity
+  name: demo-app
+  namespace: demo
+  labels:
+    app: demo-app
+  annotations:
+    owner: platform-team
+spec:                        # (4) desired state
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-app          # must match the template labels below
+  template:
+    metadata:
+      labels:
+        app: demo-ap
+        tier: web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+      - name: app
+        image: traefik/whoami:v1.12.0   # tiny web server: answers with the Pod's name
+        env:
+        - name: WHOAMI_PORT_NUMBER
+          value: "8080"                # non-root cannot bind port 80
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: demo
+data:                        # ConfigMap: data instead of spec
+  LOG_LEVEL: "info"

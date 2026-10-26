@@ -1,0 +1,24 @@
+# Default-deny egress also blocks DNS. Let every Pod in demo reach CoreDNS (Service kube-dns) on port 53.
+# ONE list item with both selectors = AND: "Pods labelled k8s-app=kube-dns, in namespace kube-system".
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system   # set automatically on every namespace
+          podSelector:                                   # no "-" here: same item, so AND
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

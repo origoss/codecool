@@ -1,0 +1,119 @@
+/* From Code to Cluster: shared lesson stylesheet. Every lesson and reference sheet links this file. */
+:root {
+  --bg: #fffff8;
+  --fg: #111;
+  --muted: #5b5b55;
+  --rule: #d9d6c8;
+  --accent: #a3301e;
+  --code-bg: #f3f1e6;
+  --ok: #1e6b35;
+  --ok-bg: #e5f2e8;
+  --bad: #9a2318;
+  --bad-bg: #f8e4e1;
+  --measure: 40rem;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161614; --fg: #e8e6dc; --muted: #a09d90; --rule: #3a3933;
+    --accent: #e0826f; --code-bg: #22221e; --ok: #8fd19e; --ok-bg: #1d3324;
+    --bad: #f0a197; --bad-bg: #3a1f1b;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161614; --fg: #e8e6dc; --muted: #a09d90; --rule: #3a3933;
+  --accent: #e0826f; --code-bg: #22221e; --ok: #8fd19e; --ok-bg: #1d3324;
+  --bad: #f0a197; --bad-bg: #3a1f1b;
+}
+
+* { box-sizing: border-box; }
+html { font-size: 18px; }
+body {
+  margin: 0; padding: 3rem 1rem 5rem;
+  background: var(--bg); color: var(--fg);
+  font-family: var(--serif); line-height: 1.55;
+}
+main { max-width: var(--measure); margin: 0 auto; }
+
+/* Header */
+.crumbs { font-size: .8rem; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+h1 { font-weight: 400; font-size: 2.1rem; line-height: 1.15; margin: .3rem 0 .8rem; }
+h2 { font-weight: 400; font-style: italic; font-size: 1.4rem; margin: 2.6rem 0 .6rem; border-top: 1px solid var(--rule); padding-top: 1.4rem; }
+h3 { font-weight: 600; font-size: 1rem; margin: 1.8rem 0 .4rem; }
+.win { border-left: 3px solid var(--accent); padding: .2rem 0 .2rem 1rem; margin: 1.2rem 0; }
+.win strong { color: var(--accent); font-weight: 600; }
+.meta { color: var(--muted); font-size: .9rem; }
+
+a { color: inherit; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+sup.cite a { text-decoration: none; color: var(--accent); font-size: .75em; }
+
+/* Code and terminal steps */
+code, pre { font-family: var(--mono); font-size: .82rem; }
+:not(pre) > code { background: var(--code-bg); padding: .08em .3em; border-radius: 3px; }
+pre {
+  background: var(--code-bg); padding: .9rem 1rem; border-radius: 4px;
+  overflow-x: auto; line-height: 1.45; position: relative; margin: .6rem 0 1rem;
+}
+pre.cmd::before { content: "$ "; color: var(--muted); }
+pre.file { border-top: 2px solid var(--rule); }
+.filename { font-family: var(--mono); font-size: .75rem; color: var(--muted); margin-bottom: -.4rem; }
+.copy {
+  position: absolute; top: .4rem; right: .4rem; font: .7rem var(--mono);
+  background: var(--bg); color: var(--muted); border: 1px solid var(--rule);
+  border-radius: 3px; padding: .15rem .45rem; cursor: pointer;
+}
+ol.steps { padding-left: 1.3rem; }
+ol.steps > li { margin-bottom: 1.4rem; }
+ol.steps > li::marker { font-weight: 600; color: var(--accent); }
+details.expect { margin: -.4rem 0 1rem; font-size: .9rem; }
+details.expect summary { cursor: pointer; color: var(--muted); }
+details.expect pre { margin-top: .4rem; }
+
+/* Side notes (Tufte-ish margin notes collapse inline on narrow screens) */
+.note { font-size: .85rem; color: var(--muted); border-left: 1px solid var(--rule); padding-left: .8rem; margin: .8rem 0; }
+.warn { font-size: .9rem; background: var(--bad-bg); padding: .6rem .9rem; border-radius: 4px; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: .8rem 0 1.2rem; }
+th, td { text-align: left; vertical-align: top; padding: .4rem .6rem .4rem 0; border-bottom: 1px solid var(--rule); }
+th { font-weight: 600; font-size: .78rem; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+
+/* Quiz */
+.quiz-q { border: 0; padding: 0; margin: 0 0 2rem; }
+.quiz-q legend { font-weight: 600; margin-bottom: .5rem; padding: 0; }
+.quiz-q .kind { font-weight: 400; font-size: .75rem; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); display: block; }
+.quiz-q button.opt {
+  display: block; width: 100%; text-align: left; margin: .35rem 0;
+  font: inherit; font-size: .95rem; color: var(--fg); background: transparent;
+  border: 1px solid var(--rule); border-radius: 4px; padding: .5rem .8rem; cursor: pointer;
+}
+.quiz-q button.opt:hover:not(:disabled) { border-color: var(--fg); }
+.quiz-q button.opt.right { background: var(--ok-bg); border-color: var(--ok); }
+.quiz-q button.opt.wrong { background: var(--bad-bg); border-color: var(--bad); }
+.quiz-q button.opt:disabled { cursor: default; }
+.quiz-q .why { font-size: .9rem; margin-top: .5rem; min-height: 1.2em; }
+.quiz-q .why.right { color: var(--ok); }
+.quiz-q .why.wrong { color: var(--bad); }
+.quiz-score { font-style: italic; color: var(--muted); }
+
+/* Footer blocks */
+.source { background: var(--code-bg); padding: 1rem 1.2rem; border-radius: 4px; }
+.ask { font-style: italic; }
+nav.pager { display: flex; justify-content: space-between; margin-top: 3rem; font-size: .9rem; }
+nav.pager .off { color: var(--muted); }
+
+@media print {
+  body { background: #fff; color: #000; padding: 0; }
+  .copy, details.expect summary { display: none; }
+  details.expect { display: block; }
+  details.expect > * { display: block; }
+  pre { white-space: pre-wrap; }
+  h2 { break-after: avoid; }
+  .quiz-q button.opt { border: 1px solid #999; }
+}
+
+/* Diagrams: d2 sources + rendered SVGs in assets/diagrams/ (re-render: d2 --theme 0 --pad 30 X.d2 X.svg) */
+figure.diagram { margin: 1.5rem 0; }
+figure.diagram img { display: block; width: 100%; height: auto; background: #fff; border: 1px solid var(--rule); border-radius: 4px; }
+figure.diagram figcaption { font-size: .85em; color: var(--muted); margin-top: .4rem; }

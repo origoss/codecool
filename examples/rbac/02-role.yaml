@@ -1,0 +1,10 @@
+# WHAT may be done, in ONE namespace: read ConfigMaps. Nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: configmap-reader
+  namespace: demo
+rules:
+  - apiGroups: [""]                 # "" = the core API group (configmaps, secrets, pods, ...)
+    resources: ["configmaps"]
+    verbs: ["get", "list"]

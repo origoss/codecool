@@ -1,0 +1,33 @@
+# Reads the synced Secret two ways: as an env var (fixed at start) and as a
+# mounted file (updated by the kubelet after the Secret changes).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: busybox:1.37
+      command:
+        - sh
+        - -c
+        - |
+          while true; do
+            echo "$(date +%T) env=$DB_PASSWORD file=$(cat /etc/db/password)"
+            sleep 10
+          done
+      env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-db-credentials
+              key: password
+      volumeMounts:
+        - name: db
+          mountPath: /etc/db
+          readOnly: true
+  volumes:
+    - name: db
+      secret:
+        secretName: app-db-credentials

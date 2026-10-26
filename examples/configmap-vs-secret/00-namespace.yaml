@@ -1,0 +1,5 @@
+# The demo namespace for the whole session. Later lessons apply it again; that changes nothing.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo

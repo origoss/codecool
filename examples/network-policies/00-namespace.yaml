@@ -1,0 +1,5 @@
+# The demo namespace (also created in lesson 01; applying it again changes nothing).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo

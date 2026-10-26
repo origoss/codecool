@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kubernetes RBAC</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/lesson.js" defer></script>
+</head>
+<body>
+<main>
+
+<p class="crumbs">Lesson 02 · Configuration &amp; security · about 30 minutes · instructor demo, review afterwards</p>
+<h1>Kubernetes RBAC: who may do what</h1>
+
+<div class="win">
+  <strong>Your win:</strong> you can read a Role and a RoleBinding and predict the answer of <code>kubectl auth can-i</code> before anyone runs it. You watch a ServiceAccount that may only read ConfigMaps in <code>demo</code> get its <code>yes</code>, and its <code>Forbidden</code> on the Secret from lesson 01.
+</div>
+
+<p class="meta">Before this: <a href="0001-configmap-vs-secret.html">lesson 01</a> left the namespace <code>demo</code> and the ConfigMap <code>app-config</code>; its cleanup deleted the Secret <code>db-credentials</code> (step 9 recreates it). The instructor runs every command below as a cluster administrator on the shared EKS cluster, from the course folder. The example files are in <code>examples/rbac/</code>.</p>
+
+<h2>Recap: everything goes through the API server</h2>
+
+<p>Kubernetes has a "hub-and-spoke" API pattern: "All API usage from nodes (or the pods they run) terminates at the API server."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/architecture/control-plane-node-communication/">[13]</a></sup> The scheduler, the controllers, every kubelet and every <code>kubectl</code> call are clients of the same API server. So the API server is the one place where access is checked, and RBAC is how it decides.</p>
+
+<figure class="diagram">
+  <a href="../assets/diagrams/k8s-architecture.svg"><img src="../assets/diagrams/k8s-architecture.svg" alt="Kubernetes control plane (kube-apiserver, etcd, scheduler, controller managers) and data plane (nodes with kubelet, kube-proxy, CNI and Pods); every component talks to the API server"></a>
+  <figcaption>Control plane and data plane. On EKS, AWS runs the control plane; the worker nodes are EC2 instances in your VPC. Click to enlarge.</figcaption>
+</figure>
+
+<h2>Two questions on every request</h2>
+
+<p>Every <code>kubectl</code> command is an HTTP request to the API server. Before the API server does anything, it asks two questions, in this order:<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/authorization/">[1]</a></sup></p>
+
+<table>
+  <thead><tr><th></th><th>Question</th><th>Answered by</th><th>On failure</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Authentication</strong> (authn)</td><td>Who are you?</td><td>a certificate, a token, or on EKS your IAM identity</td><td><code>401 Unauthorized</code></td></tr>
+    <tr><td><strong>Authorization</strong> (authz)</td><td>May you do <em>this</em>?</td><td>RBAC: Roles and their bindings</td><td><code>403 Forbidden</code></td></tr>
+  </tbody>
+</table>
+
+<p>This lesson is about the second question. Authentication only produces a <strong>username</strong> and a list of <strong>groups</strong>; RBAC decides with those. The one thing to remember from authentication: <em>Kubernetes has no User objects.</em> You cannot <code>kubectl create user</code>. A human "exists" only as a name that some trusted authenticator vouches for.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/authentication/">[2]</a></sup></p>
+
+<h2>Subjects: who gets permissions</h2>
+
+<p>A binding hands permissions to a list of <strong>subjects</strong>. There are three kinds:<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-subjects">[3]</a></sup></p>
+
+<table>
+  <thead><tr><th>Kind</th><th>What it is</th><th>Example name</th></tr></thead>
+  <tbody>
+    <tr><td><code>User</code></td><td>a human (or a tool) authenticated from outside. Just a string; no object behind it.</td><td><code>jane@example.com</code></td></tr>
+    <tr><td><code>Group</code></td><td>a string attached to users at authentication time. Bind to groups, not to single people.</td><td><code>platform-team</code></td></tr>
+    <tr><td><code>ServiceAccount</code></td><td>an identity for <strong>Pods</strong>: a real namespaced object you create with YAML.</td><td><code>system:serviceaccount:demo:config-reader</code></td></tr>
+  </tbody>
+</table>
+
+<p>A ServiceAccount's username is always <code>system:serviceaccount:&lt;namespace&gt;:&lt;name&gt;</code> (singular), and it belongs to the groups <code>system:serviceaccounts</code> and <code>system:serviceaccounts:&lt;namespace&gt;</code> (plural).<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-subjects">[3]</a></sup> Every namespace has one called <code>default</code>; a Pod that names no ServiceAccount runs as it.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/">[4]</a></sup></p>
+
+<h2>Rules: verbs × resources × apiGroups</h2>
+
+<p>A permission is a <strong>rule</strong>: which <code>verbs</code> on which <code>resources</code> in which <code>apiGroups</code>. Rules only ever say <em>allow</em>.</p>
+
+<div class="filename">examples/rbac/02-role.yaml</div>
+<pre class="file">apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: configmap-reader
+  namespace: demo
+rules:
+  - apiGroups: [""]                 # "" = the core API group (configmaps, secrets, pods, ...)
+    resources: ["configmaps"]
+    verbs: ["get", "list"]</pre>
+
+<ul>
+  <li><strong>apiGroups</strong>: the part of <code>apiVersion</code> before the slash. Deployments are <code>apps/v1</code>, so <code>"apps"</code>. ConfigMaps, Secrets and Pods are plain <code>v1</code>: the <em>core</em> group, written as the empty string <code>""</code>.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-example">[5]</a></sup></li>
+  <li><strong>resources</strong>: plural, lower case, as in the URL: <code>configmaps</code>, <code>pods</code>, <code>pods/log</code> (a subresource).</li>
+  <li><strong>verbs</strong>: what the request does. They map to HTTP methods:<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/authorization/#determine-the-request-verb">[1]</a></sup></li>
+</ul>
+
+<table>
+  <thead><tr><th>Verb</th><th>Typical command</th><th>HTTP</th></tr></thead>
+  <tbody>
+    <tr><td><code>get</code></td><td><code>kubectl get configmap app-config</code> (one, by name)</td><td>GET</td></tr>
+    <tr><td><code>list</code></td><td><code>kubectl get configmaps</code> (all of them)</td><td>GET</td></tr>
+    <tr><td><code>watch</code></td><td><code>kubectl get configmaps -w</code></td><td>GET</td></tr>
+    <tr><td><code>create</code> / <code>update</code> / <code>patch</code></td><td><code>kubectl apply</code>, <code>kubectl edit</code></td><td>POST / PUT / PATCH</td></tr>
+    <tr><td><code>delete</code> / <code>deletecollection</code></td><td><code>kubectl delete</code></td><td>DELETE</td></tr>
+  </tbody>
+</table>
+
+<p class="warn"><strong><code>list</code> on Secrets is as dangerous as <code>get</code>.</strong> A list response carries the full objects, data included: <code>kubectl get secrets -o yaml</code> prints every value. The Kubernetes docs: "<strong>list</strong> on <code>secrets</code> will reveal the <strong>data</strong> attributes of any returned resources."<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/authorization/#determine-the-request-verb">[1]</a></sup> The same holds for <code>watch</code>. Treat <code>get</code>, <code>list</code> and <code>watch</code> on Secrets as one permission: <em>read all the passwords</em>.</p>
+
+<h2>Four objects: two say what, two say who</h2>
+
+<p>RBAC is four kinds of object in the API group <code>rbac.authorization.k8s.io</code>. A <strong>Role</strong> or <strong>ClusterRole</strong> lists rules (<em>what</em>). A <strong>RoleBinding</strong> or <strong>ClusterRoleBinding</strong> connects a role to subjects (<em>who</em>). A role does nothing until something binds it.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#api-overview">[6]</a></sup></p>
+
+<table>
+  <thead><tr><th>Binding</th><th>points at</th><th>Grants</th></tr></thead>
+  <tbody>
+    <tr><td>RoleBinding (namespaced)</td><td>a Role in the same namespace</td><td>the Role's rules, in that namespace</td></tr>
+    <tr><td>RoleBinding (namespaced)</td><td>a ClusterRole</td><td>the ClusterRole's rules, <strong>only in the RoleBinding's namespace</strong></td></tr>
+    <tr><td>ClusterRoleBinding (cluster-wide)</td><td>a ClusterRole</td><td>the rules in <strong>every</strong> namespace, plus cluster-scoped resources (nodes, namespaces)</td></tr>
+  </tbody>
+</table>
+
+<p>The middle row is the useful trick: define a role once as a ClusterRole, then grant it namespace by namespace with RoleBindings. Kubernetes ships ready-made ClusterRoles for this: <code>view</code>, <code>edit</code>, <code>admin</code> and <code>cluster-admin</code>.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#user-facing-roles">[7]</a></sup> <code>view</code> deliberately cannot read Secrets; <code>edit</code> can.</p>
+
+<p class="note">A binding's <code>roleRef</code> cannot be changed after creation. To point a binding at a different role, delete it and create a new one. That way nobody silently swaps the role under an existing list of subjects.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#rolebinding-and-clusterrolebinding">[6]</a></sup></p>
+
+<h2>Deny by default, allow only</h2>
+
+<p>Two rules decide every answer:</p>
+<ol>
+  <li><strong>Nothing is allowed until a rule allows it.</strong> "If all modules have no opinion on the request, then the request is denied."<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/authorization/">[1]</a></sup> A brand new ServiceAccount can do (almost) nothing.</li>
+  <li><strong>Permissions only add up.</strong> "Permissions are purely additive (there are no "deny" rules)."<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/">[6]</a></sup> A subject with three bindings has the union of all three. To take a permission away, you remove the binding or the rule that grants it; you cannot write a rule that says "except Secrets".</li>
+</ol>
+
+<p>So to predict <code>kubectl auth can-i</code>: collect every binding whose subjects include this user, its groups, or its ServiceAccount, in this namespace or cluster-wide. If any rule in those roles matches the verb, resource and API group, the answer is <code>yes</code>. Otherwise <code>no</code>.</p>
+
+<h2>Do it</h2>
+
+<p class="meta">All commands use <code>--as</code>: the instructor, who is allowed to <em>impersonate</em>, asks the API server to evaluate the request as if another user sent it.<sup class="cite"><a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_auth/kubectl_auth_can-i/">[8]</a></sup> Nobody needs the ServiceAccount's token for that.</p>
+
+<h3>A ServiceAccount that may only read ConfigMaps</h3>
+
+<ol class="steps">
+<li>
+  <p>Create the ServiceAccount: one per workload, with no automatic API token.</p>
+  <div class="filename">examples/rbac/01-serviceaccount.yaml</div>
+<pre class="file">apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: config-reader
+  namespace: demo
+automountServiceAccountToken: false   # no API token in Pods unless a Pod asks for one</pre>
+<pre class="cmd">kubectl apply -f examples/rbac/00-namespace.yaml -f examples/rbac/01-serviceaccount.yaml</pre>
+<pre class="cmd">kubectl auth can-i list configmaps -n demo --as=system:serviceaccount:demo:config-reader</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>namespace/demo unchanged
+serviceaccount/config-reader created
+no</pre>
+  </details>
+  <p>Default deny, live: the ServiceAccount exists, but no binding mentions it, so the answer is <code>no</code>. (<code>can-i</code> also sets its exit code: 0 for yes, 1 for no, handy in scripts.)</p>
+</li>
+
+<li>
+  <p>Apply the Role from above and the RoleBinding that gives it to <code>config-reader</code>.</p>
+  <div class="filename">examples/rbac/03-rolebinding.yaml</div>
+<pre class="file">apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: config-reader-configmap-reader
+  namespace: demo
+subjects:
+  - kind: ServiceAccount
+    name: config-reader
+    namespace: demo
+roleRef:                            # cannot be changed later: delete and recreate instead
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: configmap-reader</pre>
+<pre class="cmd">kubectl apply -f examples/rbac/02-role.yaml -f examples/rbac/03-rolebinding.yaml</pre>
+<pre class="cmd">kubectl get rolebinding -n demo -o wide</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>role.rbac.authorization.k8s.io/configmap-reader created
+rolebinding.rbac.authorization.k8s.io/config-reader-configmap-reader created
+NAME                             ROLE                    AGE   USERS   GROUPS   SERVICEACCOUNTS
+config-reader-configmap-reader   Role/configmap-reader   1s                     demo/config-reader</pre>
+  </details>
+  <p class="note">Forgot the shape of a Role? <code>kubectl create role configmap-reader -n demo --verb=get,list --resource=configmaps --dry-run=client -o yaml</code> prints it without creating anything.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#kubectl-create-role">[6]</a></sup></p>
+</li>
+
+<li>
+  <p>Predict each answer before the instructor presses Enter.</p>
+<pre class="cmd">kubectl auth can-i list configmaps -n demo --as=system:serviceaccount:demo:config-reader</pre>
+<pre class="cmd">kubectl auth can-i delete configmaps -n demo --as=system:serviceaccount:demo:config-reader</pre>
+<pre class="cmd">kubectl auth can-i get configmaps -n default --as=system:serviceaccount:demo:config-reader</pre>
+<pre class="cmd">kubectl auth can-i get secrets -n demo --as=system:serviceaccount:demo:config-reader</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>yes
+no
+no
+no</pre>
+  </details>
+  <p>Only the exact combination in the rule passes: verb <code>list</code>, resource <code>configmaps</code>, namespace <code>demo</code>. Wrong verb, wrong namespace, or wrong resource: <code>no</code>.</p>
+</li>
+
+<li>
+  <p>Now real requests, not just questions. The ConfigMap from lesson 01, then its Secret:</p>
+<pre class="cmd">kubectl get configmaps -n demo --as=system:serviceaccount:demo:config-reader</pre>
+<pre class="cmd">kubectl get secret db-credentials -n demo --as=system:serviceaccount:demo:config-reader</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>NAME               DATA   AGE
+app-config         2      115s
+kube-root-ca.crt   1      115s
+Error from server (Forbidden): secrets "db-credentials" is forbidden: User "system:serviceaccount:demo:config-reader" cannot get resource "secrets" in API group "" in the namespace "demo"</pre>
+  </details>
+  <p>Read the error word by word: it names the <strong>user</strong>, the <strong>verb</strong> (<code>get</code>), the <strong>resource</strong>, the <strong>API group</strong> (<code>""</code>, core) and the <strong>namespace</strong>. Those are exactly the fields a rule must match, so the error tells you which rule is missing. <code>kube-root-ca.crt</code> is created automatically in every namespace.</p>
+  <p class="note">Lesson 01's cleanup already deleted <code>db-credentials</code>, yet the answer is <code>Forbidden</code>, not <code>NotFound</code>. Authorization runs before the API server looks for the object, so a subject without access cannot even learn whether a Secret exists.</p>
+</li>
+
+<li>
+  <p>Ask the other way round: what <em>can</em> this ServiceAccount do here?</p>
+<pre class="cmd">kubectl auth can-i --list -n demo --as=system:serviceaccount:demo:config-reader</pre>
+  <details class="expect"><summary>Expected output (trimmed)</summary>
+<pre>Warning: the list may be incomplete: webhook authorizer does not support user rule resolution
+Resources                                       Non-Resource URLs                      Resource Names   Verbs
+selfsubjectreviews.authentication.k8s.io        []                                     []               [create]
+selfsubjectaccessreviews.authorization.k8s.io   []                                     []               [create]
+selfsubjectrulesreviews.authorization.k8s.io    []                                     []               [create]
+clustertrustbundles.certificates.k8s.io         []                                     []               [get list watch]
+configmaps                                      []                                     []               [get list]
+                                                [/api/*]                               []               [get]
+                                                [/api]                                 []               [get]
+                                                [/healthz]                             []               [get]
+                                                [/version]                             []               [get]
+                                                ...</pre>
+  </details>
+  <p>Our rule is the <code>configmaps [get list]</code> line. Everything else comes from built-in ClusterRoles that every authenticated identity gets: asking "who am I / what can I do", and reading API discovery and health URLs. Nothing about Secrets.</p>
+  <p class="note">The warning is normal on EKS. EKS checks access with a second authorizer (a webhook, used for EKS access entries) besides RBAC, and <code>--list</code> can only show the RBAC part.</p>
+</li>
+</ol>
+
+<h3>A RoleBinding that points at a ClusterRole</h3>
+
+<ol class="steps" start="6">
+<li>
+  <p>A second ServiceAccount, <code>viewer</code>, gets the built-in ClusterRole <code>view</code>, but through a <em>RoleBinding</em> in <code>demo</code>.</p>
+  <div class="filename">examples/rbac/04-viewer.yaml (the binding part)</div>
+<pre class="file">kind: RoleBinding
+metadata:
+  name: viewer-view
+  namespace: demo
+subjects:
+  - kind: ServiceAccount
+    name: viewer
+    namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole                 # reusable definition ...
+  name: view                        # ... applied only in this RoleBinding's namespace</pre>
+<pre class="cmd">kubectl apply -f examples/rbac/04-viewer.yaml</pre>
+<pre class="cmd">kubectl auth can-i list pods -n demo --as=system:serviceaccount:demo:viewer</pre>
+<pre class="cmd">kubectl auth can-i list pods -n default --as=system:serviceaccount:demo:viewer</pre>
+<pre class="cmd">kubectl auth can-i list secrets -n demo --as=system:serviceaccount:demo:viewer</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>serviceaccount/viewer created
+rolebinding.rbac.authorization.k8s.io/viewer-view created
+yes
+no
+no</pre>
+  </details>
+  <p>The ClusterRole is cluster-wide as a <em>definition</em>; the RoleBinding limits the <em>grant</em> to <code>demo</code>. And <code>view</code> reads almost everything except Secrets, by design.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#user-facing-roles">[7]</a></sup></p>
+</li>
+
+<li>
+  <p>Try to repoint the first binding at <code>view</code>:</p>
+<pre class="cmd">kubectl patch rolebinding config-reader-configmap-reader -n demo --type=merge -p '{"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"ClusterRole","name":"view"}}'</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>The RoleBinding "config-reader-configmap-reader" is invalid: roleRef: Invalid value: {"APIGroup":"rbac.authorization.k8s.io","Kind":"ClusterRole","Name":"view"}: field is immutable</pre>
+  </details>
+  <p><code>roleRef</code> is fixed for the life of a binding. Delete and recreate if you ever need a different role.</p>
+</li>
+</ol>
+
+<h3>The ServiceAccount inside a Pod</h3>
+
+<ol class="steps" start="8">
+<li>
+  <p>So far we only impersonated. A real workload uses the ServiceAccount's token, mounted into the Pod. This one-shot Pod runs <code>kubectl</code> as <code>config-reader</code>. The ServiceAccount says "no token"; the Pod overrides that because it really calls the API. The Pod's setting wins.<sup class="cite"><a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting">[4]</a></sup></p>
+  <div class="filename">examples/rbac/05-pod.yaml</div>
+<pre class="file">apiVersion: v1
+kind: Pod
+metadata:
+  name: rbac-client
+  namespace: demo
+spec:
+  serviceAccountName: config-reader
+  automountServiceAccountToken: true   # this Pod needs the token; the Pod spec wins over the SA
+  restartPolicy: Never
+  containers:
+    - name: kubectl
+      image: registry.k8s.io/kubectl:v1.37.0   # contains only the kubectl binary
+      args: ["get", "configmaps,secrets"]      # kubectl finds the mounted token on its own</pre>
+<pre class="cmd">kubectl apply -f examples/rbac/05-pod.yaml</pre>
+<pre class="cmd">kubectl logs -n demo rbac-client</pre>
+  <details class="expect"><summary>Expected output (wait a few seconds after apply)</summary>
+<pre>pod/rbac-client created
+NAME               DATA   AGE
+app-config         2      2m6s
+kube-root-ca.crt   1      2m6s
+Error from server (Forbidden): secrets is forbidden: User "system:serviceaccount:demo:config-reader" cannot list resource "secrets" in API group "" in the namespace "demo"</pre>
+  </details>
+  <p>Same answer as with <code>--as</code>: ConfigMaps yes, Secrets <code>Forbidden</code>. The Pod ends in <code>Error</code> because kubectl exited non-zero on the Secret. Without the token (set <code>automountServiceAccountToken: false</code> on the Pod) kubectl finds no credentials at all and fails with <code>The connection to the server localhost:8080 was refused</code>.</p>
+</li>
+
+<li>
+  <p>Finally, why <code>list</code> on Secrets matters. As administrator, recreate lesson 01's Secret with the same command, then list the Secrets:</p>
+<pre class="cmd">kubectl create secret generic db-credentials -n demo --from-literal=username=app --from-literal=password='S3cr3t!'</pre>
+<pre class="cmd">kubectl get secrets -n demo -o yaml</pre>
+  <details class="expect"><summary>Expected output (trimmed)</summary>
+<pre>secret/db-credentials created
+apiVersion: v1
+items:
+- apiVersion: v1
+  data:
+    password: UzNjcjN0IQ==
+    username: YXBw
+  kind: Secret
+  metadata:
+    name: db-credentials
+    namespace: demo
+  type: Opaque
+kind: List</pre>
+  </details>
+  <p>No <code>get</code> on a single Secret was needed: one <code>list</code> returned every value, base64-encoded, which (lesson 01) is not encryption. <code>UzNjcjN0IQ==</code> is <code>S3cr3t!</code>, <code>YXBw</code> is <code>app</code>. Anyone holding <code>list secrets</code> in a namespace holds all of its passwords.</p>
+</li>
+</ol>
+
+<p class="note">Clean up after the demo: <code>kubectl delete -f examples/rbac/05-pod.yaml -f examples/rbac/04-viewer.yaml -f examples/rbac/03-rolebinding.yaml -f examples/rbac/02-role.yaml -f examples/rbac/01-serviceaccount.yaml</code> and <code>kubectl delete secret db-credentials -n demo</code>. Keep the namespace; the next lessons use it.</p>
+
+<h2>Best practices</h2>
+
+<ul>
+  <li><strong>Least privilege.</strong> Grant only the verbs and resources a subject really uses, and prefer a RoleBinding in one namespace to a ClusterRoleBinding.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/#least-privilege">[9]</a></sup></li>
+  <li><strong>Avoid <code>cluster-admin</code></strong> except where it is truly needed. It allows every action on every resource.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/#least-privilege">[9]</a></sup></li>
+  <li><strong>Avoid wildcards</strong> (<code>"*"</code>) in <code>verbs</code> and <code>resources</code>. A wildcard also grants every resource type and verb added to the cluster <em>later</em>, for example by a new operator's CRDs.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/#least-privilege">[9]</a></sup></li>
+  <li><strong>Treat <code>get</code>, <code>list</code>, <code>watch</code> on Secrets as "read all secrets".</strong> Give them to as few subjects as possible, ideally only to the controller that needs them (lesson 03's External Secrets Operator).<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/#listing-secrets">[9]</a></sup></li>
+  <li><strong><code>automountServiceAccountToken: false</code></strong> by default. Most apps never call the Kubernetes API, so their Pods should carry no token; switch it on per Pod when one does.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/#hardening">[9]</a></sup></li>
+  <li><strong>One ServiceAccount per workload</strong>, never the namespace's <code>default</code>. Permissions given to <code>default</code> leak to every Pod that forgot to name a ServiceAccount, and a dedicated name shows up in audit logs and error messages. The RBAC docs rank an application-specific ServiceAccount as the most secure option.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#service-account-permissions">[6]</a></sup></li>
+</ul>
+
+<p class="warn"><strong>Creating Pods is a back door.</strong> A Pod can run as any ServiceAccount in its namespace. So whoever may create Pods (or Deployments) in a namespace effectively has the permissions of every ServiceAccount there.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation">[9]</a></sup></p>
+
+<h2>Big picture: one Pod, two permission systems</h2>
+
+<p>A Pod's ServiceAccount is its identity in <em>both</em> worlds, but with two different tokens and two separate authorization systems. For the API server, the kubelet mounts a token whose audience is the kube-apiserver at <code>/var/run/secrets/kubernetes.io/serviceaccount</code>.<sup class="cite"><a href="https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/">[14]</a></sup> For AWS, EKS Pod Identity mounts a second token with audience <code>pods.eks.amazonaws.com</code>; the Pod Identity Agent on the node exchanges it for temporary IAM role credentials with <code>AssumeRoleForPodIdentity</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/pod-id-how-it-works.html">[15]</a></sup> RBAC never decides AWS calls, and IAM never decides Kubernetes calls. <a href="0003-external-secrets-aws.html">Lesson 03</a> uses the AWS half.</p>
+
+<figure class="diagram">
+  <a href="../assets/diagrams/pod-rbac-iam.svg"><img src="../assets/diagrams/pod-rbac-iam.svg" alt="A Pod uses token A to call the API server, checked by RBAC RoleBinding and Role; it uses token B via the EKS Pod Identity Agent to get IAM role credentials and call Secrets Manager, checked by the IAM policy"></a>
+  <figcaption>Top: Kubernetes path (① – ④), AuthN then RBAC. Bottom: AWS path (ⓐ – ⓕ), Pod Identity then IAM. Same pattern on both sides: identity → binding → permissions. Click to enlarge.</figcaption>
+</figure>
+
+<h2>On EKS: humans come from IAM</h2>
+
+<p>Pods use ServiceAccounts. Humans on EKS log in with their <strong>IAM</strong> identity (usually an IAM role). An <strong>EKS access entry</strong> connects that IAM principal to Kubernetes permissions, in one of two ways:<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/access-entries.html">[10]</a></sup></p>
+<ul>
+  <li><strong>Access policy</strong>: an AWS-managed permission set, scoped to the cluster or to namespaces. <code>AmazonEKSViewPolicy</code>, <code>AmazonEKSEditPolicy</code>, <code>AmazonEKSAdminPolicy</code> and <code>AmazonEKSClusterAdminPolicy</code> resemble the built-in <code>view</code>, <code>edit</code>, <code>admin</code>, <code>cluster-admin</code>. Like RBAC, they contain only allow rules.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/access-policy-permissions.html">[11]</a></sup></li>
+  <li><strong>Kubernetes groups</strong>: the access entry puts the IAM principal into a group name, and <em>your own</em> RoleBindings grant that group permissions. Everything in this lesson applies unchanged; the subject is just <code>kind: Group</code>.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/creating-access-entries.html">[12]</a></sup></li>
+</ul>
+
+<pre class="cmd">aws eks create-access-entry --cluster-name codecool-demo --principal-arn arn:aws:iam::640629842382:role/demo-viewers --kubernetes-groups demo-viewers</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>codecool-demo</code> is the course cluster and <code>640629842382</code> is its AWS account, and the IAM role <code>demo-viewers</code> must already exist — use yours (find the account with <code>aws sts get-caller-identity</code>).</p>
+<p class="warn">If the role was just created, this can fail with <code>InvalidParameterException ... The specified principalArn is invalid: invalid principal.</code> IAM needs a few seconds to propagate; retry.</p>
+<details class="expect"><summary>Expected output (trimmed)</summary>
+<pre>{
+    "accessEntry": {
+        "clusterName": "codecool-demo",
+        "principalArn": "arn:aws:iam::640629842382:role/demo-viewers",
+        "kubernetesGroups": [
+            "demo-viewers"
+        ],
+        "username": "arn:aws:sts::640629842382:assumed-role/demo-viewers/{{SessionName}}",
+        "type": "STANDARD"
+    }
+}</pre>
+</details>
+<p>After this, a RoleBinding in <code>demo</code> with subject <code>kind: Group</code>, <code>name: demo-viewers</code> and roleRef ClusterRole <code>view</code> gives everyone assuming that IAM role read access to <code>demo</code>. EKS does not check that such a binding exists: without it, the group simply has no permissions.<sup class="cite"><a href="https://docs.aws.amazon.com/eks/latest/userguide/creating-access-entries.html">[12]</a></sup> Access entries replace the older <code>aws-auth</code> ConfigMap. For Pods that need <em>AWS</em> permissions (not Kubernetes ones), see EKS Pod Identity in <a href="0003-external-secrets-aws.html">lesson 03</a>.</p>
+<p class="note">Clean up: <code>aws eks delete-access-entry --cluster-name codecool-demo --principal-arn arn:aws:iam::640629842382:role/demo-viewers</code>.</p>
+
+<h2>Check yourself</h2>
+<p class="meta">Answer from memory first. Wrong picks explain themselves.</p>
+
+<fieldset class="quiz-q" data-answer="2">
+  <legend><span class="kind">Predict the output</span>You create ServiceAccount <code>report</code> in <code>demo</code> and nothing else. What does <code>kubectl auth can-i list configmaps -n demo --as=system:serviceaccount:demo:report</code> print?</legend>
+  <button class="opt" data-why="No. A ServiceAccount gets no namespace permissions just by existing.">yes, every ServiceAccount reads its namespace</button>
+  <button class="opt" data-why="No. ConfigMaps go through RBAC like every other resource.">yes, ConfigMaps are never access controlled</button>
+  <button class="opt" data-why="Right. RBAC denies by default: no binding mentions report, so no rule allows the request.">no, because nothing grants it yet</button>
+  <button class="opt" data-why="No. can-i with --as needs no token; the API server evaluates the rules for that username.">error: the ServiceAccount has no token</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="1">
+  <legend><span class="kind">Predict the output</span>A RoleBinding in <code>demo</code> binds the ClusterRole <code>view</code> to ServiceAccount <code>demo:viewer</code>. What does <code>kubectl auth can-i list pods -n default --as=system:serviceaccount:demo:viewer</code> print?</legend>
+  <button class="opt" data-why="No. The ClusterRole is only the definition. The binding decides where it applies.">yes, because view is a ClusterRole</button>
+  <button class="opt" data-why="Right. A RoleBinding grants its role only in its own namespace, demo. In default: no.">no, a RoleBinding grants one namespace</button>
+  <button class="opt" data-why="No. That is allowed and common: define once, grant per namespace.">error: RoleBindings cannot reference a ClusterRole</button>
+  <button class="opt" data-why="No. Only a ClusterRoleBinding would grant it in every namespace.">yes, view covers every namespace automatically</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="3">
+  <legend><span class="kind">Spot the bug</span>This Role is bound correctly, yet <code>can-i get configmaps</code> says <code>no</code>. Why?
+<pre>rules:
+  - apiGroups: ["apps"]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]</pre></legend>
+  <button class="opt" data-why="No. get and list do not depend on watch.">verbs must include watch for configmaps</button>
+  <button class="opt" data-why="No. Roles grant ConfigMap access all the time; you did it in step 2.">Roles cannot grant access to configmaps</button>
+  <button class="opt" data-why="No. A RoleBinding is the right choice for one namespace.">the binding must be a ClusterRoleBinding</button>
+  <button class="opt" data-why="Right. ConfigMaps are apiVersion v1: the core group, written as &quot;&quot;. No ConfigMaps exist in apps.">ConfigMaps belong to the core group</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="1">
+  <legend><span class="kind">Concept</span>A Role grants only <code>list</code> on <code>secrets</code>, not <code>get</code>. What can its subject see?</legend>
+  <button class="opt" data-why="No. A list response contains whole objects, data included.">Only Secret names, because values need get</button>
+  <button class="opt" data-why="Right. kubectl get secrets -o yaml uses list and returns every value.">Every Secret's data, since list returns contents</button>
+  <button class="opt" data-why="No. Verbs are independent; list works without get.">Nothing at all, because list requires get</button>
+  <button class="opt" data-why="No. RBAC has no idea of ownership; rules cover all objects of the resource.">Only Secrets it created itself in demo</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="0">
+  <legend><span class="kind">Concept</span><code>config-reader</code> has two RoleBindings in <code>demo</code>: to <code>configmap-reader</code> and to <code>view</code>. It must stop reading Pods. What do you do?</legend>
+  <button class="opt" data-why="Right. Permissions only add up; the view binding is what grants pods, so remove it.">Delete the RoleBinding that grants view</button>
+  <button class="opt" data-why="No. RBAC has no deny rules. A new Role can only add permissions.">Add a Role that denies pods</button>
+  <button class="opt" data-why="No. An empty rule grants nothing, and takes nothing away from other bindings.">Set verbs to an empty list</button>
+  <button class="opt" data-why="No. Bindings have no priority; all of them apply and add up.">Bind configmap-reader again with higher priority</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="2">
+  <legend><span class="kind">Predict the output</span>You change <code>05-pod.yaml</code> to <code>automountServiceAccountToken: false</code> and run it again. What do the logs show?</legend>
+  <button class="opt" data-why="No. Without a token, kubectl has nothing to authenticate with.">The ConfigMap list, as with the token</button>
+  <button class="opt" data-why="No. The Pod still runs as config-reader, it just has no token for it.">Forbidden, because the default ServiceAccount is used</button>
+  <button class="opt" data-why="Right. No token file means no in-cluster config: kubectl falls back to localhost:8080 and fails.">A refused connection: kubectl finds no credentials</button>
+  <button class="opt" data-why="No. kubectl never reaches the API server, so no RBAC decision is made.">Forbidden for user system:anonymous listing all configmaps</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<p class="quiz-score"></p>
+
+<h2>Go further</h2>
+
+<div class="source">
+  <strong>Read next:</strong> <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/">Kubernetes: Using RBAC Authorization</a>, the sections "API objects", "Referring to resources", "Referring to subjects" and "User-facing roles" (about fifteen minutes). Then skim <a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/">Role Based Access Control Good Practices</a> for the risks this lesson only named.
+</div>
+
+<p class="ask">Not sure why an answer is <code>no</code>? Ask your instructor (or your agent) with the exact <code>Forbidden</code> message and the output of <code>kubectl get rolebindings,clusterrolebindings -A -o wide</code>. The error names every field a rule must match.</p>
+
+<p class="meta">Quick lookup: <a href="../reference/secrets-security-reference.html">secrets &amp; security reference sheet</a>.</p>
+
+<p class="meta">Sources:
+[1] <a href="https://kubernetes.io/docs/reference/access-authn-authz/authorization/">Kubernetes: Authorization</a> ·
+[2] <a href="https://kubernetes.io/docs/reference/access-authn-authz/authentication/">Kubernetes: Authenticating</a> ·
+[3] <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-subjects">Kubernetes RBAC: Referring to subjects</a> ·
+[4] <a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/">Kubernetes: Configure Service Accounts for Pods</a> ·
+[5] <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#role-example">Kubernetes RBAC: Role example</a> ·
+[6] <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/">Kubernetes: Using RBAC Authorization</a> ·
+[7] <a href="https://kubernetes.io/docs/reference/access-authn-authz/rbac/#user-facing-roles">Kubernetes RBAC: User-facing roles</a> ·
+[8] <a href="https://kubernetes.io/docs/reference/kubectl/generated/kubectl_auth/kubectl_auth_can-i/">kubectl auth can-i</a> ·
+[9] <a href="https://kubernetes.io/docs/concepts/security/rbac-good-practices/">Kubernetes: RBAC Good Practices</a> ·
+[10] <a href="https://docs.aws.amazon.com/eks/latest/userguide/access-entries.html">Amazon EKS: Grant IAM users access with access entries</a> ·
+[11] <a href="https://docs.aws.amazon.com/eks/latest/userguide/access-policy-permissions.html">Amazon EKS: Review access policy permissions</a> ·
+[12] <a href="https://docs.aws.amazon.com/eks/latest/userguide/creating-access-entries.html">Amazon EKS: Create access entries</a> ·
+[13] <a href="https://kubernetes.io/docs/concepts/architecture/control-plane-node-communication/">Kubernetes: Communication between Nodes and the Control Plane</a> ·
+[14] <a href="https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/">Kubernetes: Managing Service Accounts</a> ·
+[15] <a href="https://docs.aws.amazon.com/eks/latest/userguide/pod-id-how-it-works.html">Amazon EKS: Understand how EKS Pod Identity works</a>.
+Commands and outputs verified 2026-10-22 on the course EKS cluster (codecool-demo, eu-central-1, Kubernetes 1.37.1-eks, 2 × t3.large).</p>
+
+<nav class="pager"><a href="0001-configmap-vs-secret.html">← previous: ConfigMap vs Secret</a><a href="0003-external-secrets-aws.html">next: AWS Secrets Manager + ESO →</a></nav>
+
+</main>
+</body>
+</html>

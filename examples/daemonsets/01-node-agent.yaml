@@ -1,0 +1,33 @@
+# Lesson 05: a minimal node agent. One Pod per (eligible) node, each prints the node it runs on.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent
+  namespace: demo
+  labels:
+    app.kubernetes.io/name: node-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: node-agent      # immutable, must match the template labels
+  updateStrategy:
+    type: RollingUpdate                       # the default; the other type is OnDelete
+    rollingUpdate:
+      maxUnavailable: 1                       # replace one node's Pod at a time
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: node-agent
+    spec:
+      containers:
+      - name: agent
+        image: busybox:1.37
+        command: ["sh", "-c", "while true; do echo \"agent v1 on node $NODE_NAME\"; sleep 30; done"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName        # Downward API: the node this Pod landed on
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 32Mi}

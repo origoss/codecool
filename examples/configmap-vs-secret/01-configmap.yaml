@@ -1,0 +1,10 @@
+# Non-confidential settings. Safe to commit to Git.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: demo
+data:
+  LOG_LEVEL: "info"                 # a single value, used as an environment variable
+  greeting.txt: |                   # a whole file, used as a mounted volume
+    Hello from the ConfigMap, version 1

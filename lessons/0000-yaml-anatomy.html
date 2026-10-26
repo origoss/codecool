@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anatomy of a Kubernetes YAML</title>
+<link rel="stylesheet" href="../assets/course.css">
+<script src="../assets/lesson.js" defer></script>
+</head>
+<body>
+<main>
+
+<p class="crumbs">Session · Warm-up · about 15 minutes</p>
+<h1>Anatomy of a Kubernetes YAML: fields, labels and selectors</h1>
+
+<div class="win">
+  <strong>Your win:</strong> you can read any Kubernetes manifest and name its four parts, and you can explain how a Deployment and a Service find their Pods, and why a one-letter typo in a label breaks traffic without any error.
+</div>
+
+<p class="meta">Before this: you know <code>kubectl get</code>, <code>describe</code> and <code>apply</code>, and what a Pod, a Deployment and a Service are. Every later lesson (ConfigMap, RBAC, ExternalSecret, NetworkPolicy) is written in this format.</p>
+
+<h2>Four parts, every time</h2>
+
+<p>Every object you send to Kubernetes has the same skeleton. These fields are required:<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/#required-fields">[1]</a></sup></p>
+
+<pre class="file">apiVersion: apps/v1          # (1) which API (group/version) handles this object
+kind: Deployment             # (2) what type of object
+metadata:                    # (3) identity
+  name: demo-app             #     unique per kind + namespace
+  namespace: demo            #     omit it and you get "default"
+  labels:                    #     key/value tags: selectors match on these
+    app: demo-app
+  annotations:               #     free-form notes for tools, never used for selecting
+    owner: platform-team
+spec:                        # (4) desired state: what YOU want
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-app          #     must match the template labels below
+  template:                  #     a Pod, nested: it has its own metadata + spec
+    metadata:
+      labels:
+        app: demo-app
+        tier: web
+    spec:
+      containers:
+      - name: app            # "- " starts a list item
+        image: traefik/whoami:v1.12.0
+        env:
+        - name: WHOAMI_PORT_NUMBER
+          value: "8080"       #     (the full file also sets runAsNonRoot)
+---                          # separates objects in one file
+apiVersion: v1               # core group: just "v1"
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: demo
+data:                        # ConfigMap and Secret: data instead of spec
+  LOG_LEVEL: "info"          # values must be strings: quote numbers ("3")</pre>
+<p class="meta">File: <a href="../examples/yaml-anatomy/01-deployment.yaml"><code>examples/yaml-anatomy/01-deployment.yaml</code></a></p>
+
+<table>
+  <thead><tr><th>Field</th><th>Required</th><th>Who writes it</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>apiVersion</code></td><td>yes</td><td>you</td><td>API group/version: <code>v1</code>, <code>apps/v1</code>, <code>networking.k8s.io/v1</code></td></tr>
+    <tr><td><code>kind</code></td><td>yes</td><td>you</td><td>object type: <code>Pod</code>, <code>Deployment</code>, <code>ConfigMap</code></td></tr>
+    <tr><td><code>metadata</code></td><td>yes</td><td>you, partly</td><td><code>name</code>, <code>namespace</code>, <code>labels</code>, <code>annotations</code>; Kubernetes adds <code>uid</code>, <code>resourceVersion</code>, <code>creationTimestamp</code></td></tr>
+    <tr><td><code>spec</code></td><td>most kinds</td><td>you</td><td>the <em>desired state</em><sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/#object-spec-and-status">[1]</a></sup></td></tr>
+    <tr><td><code>data</code> / <code>stringData</code></td><td>ConfigMap, Secret</td><td>you</td><td>"Unlike most Kubernetes objects that have a <code>spec</code>, a ConfigMap has <code>data</code> and <code>binaryData</code> fields"<sup class="cite"><a href="https://kubernetes.io/docs/concepts/configuration/configmap/#configmap-object">[2]</a></sup></td></tr>
+    <tr><td><code>status</code></td><td>no</td><td>Kubernetes</td><td>the <em>current state</em>, "supplied and updated by the Kubernetes system"<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/#object-spec-and-status">[1]</a></sup>; never write it</td></tr>
+  </tbody>
+</table>
+
+<h3>YAML rules that bite</h3>
+<ul>
+  <li>Indent with <strong>spaces only</strong>, never tabs. The indent decides what belongs to what.</li>
+  <li><code>key: value</code> is a map; <code>- item</code> is a list item.</li>
+  <li><code>yes</code>, <code>no</code>, <code>3</code>, <code>1.10</code> are read as booleans or numbers. Quote them when they must be strings.</li>
+  <li><code>|</code> keeps a multi-line block with its line breaks: good for a whole config file inside a ConfigMap.</li>
+</ul>
+
+<p><strong>Don't guess field names: look them up.</strong> <code>kubectl explain</code> prints the schema of any field, straight from your cluster:</p>
+<pre class="cmd">kubectl explain deployment.spec.selector</pre>
+<details class="expect"><summary>Expected output (first lines)</summary>
+<pre>GROUP:      apps
+KIND:       Deployment
+VERSION:    v1
+
+FIELD: selector &lt;LabelSelector&gt;
+
+
+DESCRIPTION:
+    Label selector for pods. Existing ReplicaSets whose pods are selected by
+    this will be the ones affected by this deployment. It must match the pod
+    template's labels.
+    A label selector is a label query over a set of resources. The result of
+...</pre>
+</details>
+
+<h2>Labels and selectors: how objects find each other</h2>
+
+<p>Kubernetes objects do not hold direct links to each other, like a list of Pod names. They find each other with <strong>labels</strong> (key/value tags) and <strong>selectors</strong> (queries over labels). "The label selector is the core grouping primitive in Kubernetes." Labels "do not provide uniqueness": many objects are expected to carry the same label.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors">[3]</a></sup></p>
+
+<p><strong>Why it is built this way:</strong> Pods come and go. Every restart, rollout or scale-up makes new Pods with new names and new IPs, so a fixed list of Pods would be out of date within minutes. A selector is a <em>standing query</em>: whatever Pods carry <code>app=demo-app</code> right now are the members.</p>
+
+<pre class="file">Deployment ──selector app=demo-app──▶ ReplicaSet ──▶ Pods (labels: app=demo-app)
+                                                       ▲
+Service ──────selector app=demo-app────────────────────┤  → EndpointSlice (Pod IPs)
+NetworkPolicy ──podSelector app=demo-app───────────────┘  (lesson 04)</pre>
+
+<table>
+  <thead><tr><th>Object</th><th>Field</th><th>What the selector decides</th></tr></thead>
+  <tbody>
+    <tr><td>Deployment / ReplicaSet</td><td><code>spec.selector.matchLabels</code> (+ <code>matchExpressions</code>)</td><td>which Pods it counts and manages<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#selector">[4]</a></sup></td></tr>
+    <tr><td>Service</td><td><code>spec.selector</code> (a plain map)</td><td>which Pods get traffic: the Service controller "continuously scans for Pods that match its selector" and updates the EndpointSlices<sup class="cite"><a href="https://kubernetes.io/docs/concepts/services-networking/service/">[5]</a></sup></td></tr>
+    <tr><td>NetworkPolicy</td><td><code>podSelector</code>, <code>namespaceSelector</code></td><td>which Pods a rule applies to (<a href="0004-network-policies.html">lesson 04</a>)</td></tr>
+    <tr><td>You</td><td><code>kubectl get pods -l app=demo-app</code></td><td>filtering</td></tr>
+  </tbody>
+</table>
+
+<p class="note">Several requirements are joined with <strong>AND</strong>: the comma means <code>&amp;&amp;</code>, and "there is no logical OR operator".<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors">[3]</a></sup> All requirements from <code>matchLabels</code> and <code>matchExpressions</code> must be satisfied.<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#selector">[4]</a></sup></p>
+
+<h2>Demo</h2>
+
+<h3>The selector must match the template</h3>
+<ol class="steps">
+<li>
+  <p><a href="../examples/yaml-anatomy/03-deployment-bad-labels.yaml"><code>03-deployment-bad-labels.yaml</code></a> is the same file with one typo in the Pod template: <code>app: demo-ap</code>.</p>
+<pre class="cmd">kubectl apply -f examples/yaml-anatomy/00-namespace.yaml
+kubectl apply -f examples/yaml-anatomy/03-deployment-bad-labels.yaml</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>namespace/demo created
+configmap/app-config created
+The Deployment "demo-app" is invalid: spec.template.metadata.labels: Invalid value: {"app":"demo-ap","tier":"web"}: `selector` does not match template `labels`</pre>
+  </details>
+  <p>The API rejects it: a Deployment whose selector cannot find its own Pods would create Pods forever. "<code>.spec.selector</code> must match <code>.spec.template.metadata.labels</code>, or it will be rejected by the API."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#selector">[4]</a></sup></p>
+  <p class="note">Look closely: the ConfigMap in the same file <em>was</em> created. <code>kubectl apply</code> sends each object on its own; a file is not all-or-nothing.</p>
+</li>
+</ol>
+
+<h3>Labels on running Pods</h3>
+<ol class="steps" start="2">
+<li>
+<pre class="cmd">kubectl apply -f examples/yaml-anatomy/01-deployment.yaml -f examples/yaml-anatomy/02-service.yaml
+kubectl get pods -n demo --show-labels</pre>
+  <details class="expect"><summary>Expected output (your hashes and names differ)</summary>
+<pre>deployment.apps/demo-app created
+configmap/app-config unchanged
+service/demo-app created
+NAME                       READY   STATUS    RESTARTS   AGE   LABELS
+demo-app-5b48ccf55-4k46s   1/1     Running   0          5s    app=demo-app,pod-template-hash=5b48ccf55,tier=web,topology.kubernetes.io/region=eu-central-1,topology.kubernetes.io/zone=eu-central-1b
+demo-app-5b48ccf55-rphfh   1/1     Running   0          5s    app=demo-app,pod-template-hash=5b48ccf55,tier=web,topology.kubernetes.io/region=eu-central-1,topology.kubernetes.io/zone=eu-central-1c</pre>
+  </details>
+  <p class="note">We did not write the <code>topology.kubernetes.io/region</code> and <code>topology.kubernetes.io/zone</code> labels: the EKS cluster added them from the region and zone of the node each Pod runs on, and the Deployment selector ignores them because it only checks <code>app</code>.</p>
+  <p><code>pod-template-hash</code> was added by the Deployment, so each ReplicaSet (one per rollout version) selects only its own Pods.</p>
+</li>
+<li>
+  <p>The Service turned its selector into a list of Pod IPs:</p>
+<pre class="cmd">kubectl get endpointslices -n demo</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>NAME             ADDRESSTYPE   PORTS   ENDPOINTS                AGE
+demo-app-529kc   IPv4          8080    10.0.17.199,10.0.41.55   6s</pre>
+  </details>
+</li>
+<li>
+  <p>Now watch the selector at work. The app is <a href="https://github.com/traefik/whoami"><code>traefik/whoami</code></a>, a tiny web server that answers with the name of the Pod that served the request.<sup class="cite"><a href="https://github.com/traefik/whoami">[7]</a></sup> Call the Service six times from a throwaway curl Pod:</p>
+<pre class="cmd">kubectl run curl -n demo --rm -i --restart=Never --image=curlimages/curl:8.11.1 --command -- sh -c 'sleep 3; for i in 1 2 3 4 5 6; do curl -s -m 2 http://demo-app | head -1; done'</pre>
+  <details class="expect"><summary>Expected output (your order differs)</summary>
+<pre>Hostname: demo-app-5b48ccf55-4k46s
+Hostname: demo-app-5b48ccf55-4k46s
+Hostname: demo-app-5b48ccf55-rphfh
+Hostname: demo-app-5b48ccf55-rphfh
+Hostname: demo-app-5b48ccf55-4k46s
+Hostname: demo-app-5b48ccf55-rphfh</pre>
+  </details>
+  <p>One Service name, two Pods answering: the Service spreads requests over every Pod its selector matches.</p>
+  <p class="note">whoami listens on port 8080 here because the Pod runs as a non-root user, which cannot open port 80. The Service maps its port 80 to <code>targetPort: 8080</code>.</p>
+</li>
+</ol>
+
+<h3>Change a label, leave the group</h3>
+<ol class="steps" start="5">
+<li>
+  <p>Relabel one Pod (use a name from your own output):</p>
+<pre class="cmd">kubectl label pod demo-app-5b48ccf55-4k46s -n demo app=debug --overwrite
+kubectl get pods -n demo --show-labels</pre>
+<p class="note"><strong>Cluster-specific:</strong> <code>demo-app-5b48ccf55-4k46s</code> is the Pod name from our run, and Pod names differ every run — use yours (find it with <code>kubectl get pods -n demo</code>).</p>
+  <details class="expect"><summary>Expected output</summary>
+<pre>pod/demo-app-5b48ccf55-4k46s labeled
+NAME                       READY   STATUS    RESTARTS   AGE   LABELS
+demo-app-5b48ccf55-4k46s   1/1     Running   0          22s   app=debug,pod-template-hash=5b48ccf55,tier=web,topology.kubernetes.io/region=eu-central-1,topology.kubernetes.io/zone=eu-central-1b
+demo-app-5b48ccf55-rphfh   1/1     Running   0          22s   app=demo-app,pod-template-hash=5b48ccf55,tier=web,topology.kubernetes.io/region=eu-central-1,topology.kubernetes.io/zone=eu-central-1c
+demo-app-5b48ccf55-wdkz5   1/1     Running   0          6s    app=demo-app,pod-template-hash=5b48ccf55,tier=web,topology.kubernetes.io/region=eu-central-1,topology.kubernetes.io/zone=eu-central-1b</pre>
+  </details>
+  <p>The controller counts only Pods that match. It saw 1 of 2, so it created <code>wdkz5</code>. The relabelled Pod keeps running but is no longer managed. Run the curl loop again:</p>
+<pre class="cmd">kubectl run curl -n demo --rm -i --restart=Never --image=curlimages/curl:8.11.1 --command -- sh -c 'sleep 3; for i in 1 2 3 4 5 6; do curl -s -m 2 http://demo-app | head -1; done'</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>Hostname: demo-app-5b48ccf55-rphfh
+Hostname: demo-app-5b48ccf55-rphfh
+Hostname: demo-app-5b48ccf55-rphfh
+Hostname: demo-app-5b48ccf55-wdkz5
+Hostname: demo-app-5b48ccf55-rphfh
+Hostname: demo-app-5b48ccf55-wdkz5</pre>
+  </details>
+  <p><code>4k46s</code> never answers any more: it is still running, but the Service selector no longer matches it. The new <code>wdkz5</code> took its place.</p>
+  <p class="note">This is a real debugging trick: pull a misbehaving Pod out of rotation and keep it alive to inspect it. Delete it by hand when you are done.</p>
+</li>
+</ol>
+
+<h3>A Service typo fails silently</h3>
+<ol class="steps" start="6">
+<li>
+  <p><a href="../examples/yaml-anatomy/04-service-typo.yaml"><code>04-service-typo.yaml</code></a> has <code>app: demo-ap</code> in the Service selector.</p>
+<pre class="cmd">kubectl apply -f examples/yaml-anatomy/04-service-typo.yaml
+kubectl get endpointslices -n demo
+kubectl describe svc demo-app -n demo</pre>
+  <details class="expect"><summary>Expected output (describe trimmed)</summary>
+<pre>service/demo-app configured
+NAME             ADDRESSTYPE   PORTS     ENDPOINTS   AGE
+demo-app-529kc   IPv4          &lt;unset&gt;   &lt;unset&gt;     35s
+...
+Selector:                 app=demo-ap
+Type:                     ClusterIP
+...
+IP:                       172.20.20.101
+...
+Endpoints:
+...</pre>
+  </details>
+<pre class="cmd">kubectl run curl -n demo --rm -i --restart=Never --image=curlimages/curl:8.11.1 --command -- sh -c 'sleep 3; curl -sS -m 3 http://demo-app'</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>curl: (7) Failed to connect to demo-app port 80 after 4 ms: Could not connect to server</pre>
+  </details>
+  <p>No error when you applied it. The Service exists and its name still resolves, it just has no backends, so every call fails. <strong>Empty endpoints is the first thing to check when a Service "does not work".</strong></p>
+</li>
+</ol>
+
+<h3>A Deployment's selector is frozen</h3>
+<ol class="steps" start="7">
+<li>
+<pre class="cmd">kubectl patch deployment demo-app -n demo --type=merge -p '{"spec":{"selector":{"matchLabels":{"app":"other"}},"template":{"metadata":{"labels":{"app":"other"}}}}}'</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>The Deployment "demo-app" is invalid: spec.selector: Invalid value: {"matchLabels":{"app":"other"}}: field is immutable</pre>
+  </details>
+  <p>"<code>.spec.selector</code> is immutable after creation of the Deployment in <code>apps/v1</code>."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#selector">[4]</a></sup> To change it you delete and recreate the Deployment, so choose it carefully on day one.</p>
+</li>
+<li>
+  <p>Clean up:</p>
+<pre class="cmd">kubectl delete namespace demo</pre>
+  <details class="expect"><summary>Expected output</summary>
+<pre>namespace "demo" deleted</pre>
+  </details>
+</li>
+</ol>
+
+<h2>Best practices</h2>
+
+<div class="warn"><strong>Never let selectors overlap.</strong> Do not create other Pods or controllers whose labels match a Deployment's selector: "the first Deployment thinks that it created these other Pods. Kubernetes does not stop you from doing this." With overlapping selectors, "the controllers will fight with each other and won't behave correctly."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#selector">[4]</a></sup></div>
+
+<ul>
+  <li><strong>Use the recommended labels</strong>, with the shared prefix <code>app.kubernetes.io</code>: <code>name</code>, <code>instance</code>, <code>version</code>, <code>component</code>, <code>part-of</code>, <code>managed-by</code>. They let tools understand your objects "in a common manner".<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/">[6]</a></sup></li>
+  <li><strong>Keep the selector small and stable</strong>, for example <code>app.kubernetes.io/name</code> + <code>app.kubernetes.io/instance</code>. Put values that change, like <code>version</code>, in extra labels and never in the selector: the selector is immutable.</li>
+  <li><strong>Labels are for selecting; annotations are for everything else</strong> (owner, Git commit, tool settings). "Non-identifying information should be recorded using annotations."<sup class="cite"><a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/">[3]</a></sup></li>
+  <li><strong>Debug from the selector:</strong> <code>kubectl describe svc</code> shows Selector and Endpoints; compare them with <code>kubectl get pods --show-labels</code>.</li>
+</ul>
+
+<h2>Check yourself</h2>
+<p class="meta">Answer from memory first. Wrong picks explain themselves.</p>
+
+<fieldset class="quiz-q" data-answer="3">
+  <legend><span class="kind">Concept</span>Which field do you <em>never</em> write in a manifest?</legend>
+  <button class="opt" data-why="No. You always write metadata: at least the name.">metadata, Kubernetes fills it in</button>
+  <button class="opt" data-why="No. spec is exactly what you write: the desired state.">spec, Kubernetes fills it in</button>
+  <button class="opt" data-why="No. A ConfigMap's data is written by you; it replaces spec.">data, Kubernetes fills it in</button>
+  <button class="opt" data-why="Right. status is the current state, supplied and updated by Kubernetes.">status, Kubernetes fills it in</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="1">
+  <legend><span class="kind">Predict the output</span>A Service has <code>selector: {app: web}</code>. The Pods are labelled <code>app: webapp</code>. What does <code>kubectl apply</code> of the Service print?</legend>
+  <button class="opt" data-why="No. The API does not check a Service selector against Pods. Nothing fails at apply time.">an error: selector matches no running Pods</button>
+  <button class="opt" data-why="Right. It succeeds; the Service just has empty endpoints, so traffic goes nowhere.">service created, but its endpoints stay empty</button>
+  <button class="opt" data-why="No. Services never rename or relabel Pods.">service created, and the Pods get relabelled</button>
+  <button class="opt" data-why="No. Selectors match exact label values, not prefixes.">service created, since selectors match label prefixes</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="0">
+  <legend><span class="kind">Predict the output</span>A Deployment has <code>replicas: 3</code>. You change one of its Pods' labels so it no longer matches the selector. How many Pods are running a minute later?</legend>
+  <button class="opt" data-why="Right. The controller sees 2 matching Pods and creates a third; the relabelled one keeps running.">four: three matching plus one orphan</button>
+  <button class="opt" data-why="No. The controller only counts Pods that match, so it creates a replacement.">two: the relabelled Pod is ignored</button>
+  <button class="opt" data-why="No. Changing a label does not delete the Pod; it only leaves the group.">three: the relabelled Pod is deleted</button>
+  <button class="opt" data-why="No. Nothing restarts. One Pod leaves the group and a new one joins.">three: all of them are restarted</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<fieldset class="quiz-q" data-answer="2">
+  <legend><span class="kind">Best practice</span>Which label belongs in a Deployment's selector?</legend>
+  <button class="opt" data-why="No. The version changes on every release, and the selector is immutable.">app.kubernetes.io/version: it changes with every release</button>
+  <button class="opt" data-why="No. The Git commit changes all the time and is not identifying: make it an annotation.">git-commit: it changes with every push</button>
+  <button class="opt" data-why="Right. The app's name is stable for its whole life, like a selector must be.">app.kubernetes.io/name: it stays the same forever</button>
+  <button class="opt" data-why="No. Owner information is not used for selecting: record it as an annotation.">owner: it names the running team</button>
+  <div class="why" aria-live="polite"></div>
+</fieldset>
+
+<p class="quiz-score"></p>
+
+<h2>Go further</h2>
+
+<div class="source">
+  <strong>Read next:</strong> <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/">Kubernetes: Labels and Selectors</a> (about ten minutes). Equality-based and set-based selectors (<code>in</code>, <code>notin</code>, exists), and how each object type uses them. Then keep the <a href="../reference/secrets-security-reference.html">reference sheet</a> at hand.
+</div>
+
+<p class="ask">A Service with no endpoints, or a Deployment that keeps creating Pods? Ask your instructor, or your agent, with the output of <code>kubectl describe svc</code> and <code>kubectl get pods --show-labels</code>.</p>
+
+<p class="meta">Sources:
+[1] <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/">Kubernetes: Objects in Kubernetes</a> ·
+[2] <a href="https://kubernetes.io/docs/concepts/configuration/configmap/#configmap-object">Kubernetes: ConfigMap object</a> ·
+[3] <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/">Kubernetes: Labels and Selectors</a> ·
+[4] <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#selector">Kubernetes: Deployment, Selector</a> ·
+[5] <a href="https://kubernetes.io/docs/concepts/services-networking/service/">Kubernetes: Service</a> ·
+[6] <a href="https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/">Kubernetes: Recommended Labels</a> ·
+[7] <a href="https://github.com/traefik/whoami">traefik/whoami</a>.
+Commands and outputs verified 2026-10-22 on the course EKS cluster (codecool-demo, eu-central-1, Kubernetes 1.37.1-eks, 2 × t3.large).</p>
+
+<nav class="pager"><span class="off">← first lesson</span><a href="0001-configmap-vs-secret.html">next: ConfigMap vs Secret →</a></nav>
+
+</main>
+</body>
+</html>

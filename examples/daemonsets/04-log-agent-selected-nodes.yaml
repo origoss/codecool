@@ -1,0 +1,35 @@
+# Lesson 05: a DaemonSet that runs only on nodes labelled role=logging.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: log-agent
+  namespace: demo
+  labels:
+    app.kubernetes.io/name: log-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: log-agent      # immutable, must match the template labels
+  updateStrategy:
+    type: RollingUpdate                       # the default; the other type is OnDelete
+    rollingUpdate:
+      maxUnavailable: 1                       # replace one node's Pod at a time
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: log-agent
+    spec:
+      nodeSelector:
+        role: logging                         # only nodes with this label
+      containers:
+      - name: agent
+        image: busybox:1.37
+        command: ["sh", "-c", "while true; do echo \"log agent on node $NODE_NAME\"; sleep 30; done"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName        # Downward API: the node this Pod landed on
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 32Mi}

@@ -1,0 +1,14 @@
+# The ServiceAccount at work: a one-shot Pod that runs kubectl with config-reader's token.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rbac-client
+  namespace: demo
+spec:
+  serviceAccountName: config-reader
+  automountServiceAccountToken: true   # this Pod needs the token; the Pod spec wins over the SA
+  restartPolicy: Never
+  containers:
+    - name: kubectl
+      image: registry.k8s.io/kubectl:v1.37.0   # contains only the kubectl binary
+      args: ["get", "configmaps,secrets"]      # kubectl finds the mounted token on its own

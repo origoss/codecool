@@ -1,0 +1,58 @@
+# The demo app: every 5 seconds it prints what it sees, from env vars and from files.
+# It prints the password ONLY to make the demo visible. A real app never logs a secret.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.37
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                echo "env:     LOG_LEVEL=$LOG_LEVEL DB_PASSWORD=$DB_PASSWORD"
+                echo "volume:  greeting=$(cat /etc/config/greeting.txt) password=$(cat /etc/secret/password)"
+                echo "subPath: greeting=$(cat /app/greeting.txt)"
+                sleep 5
+              done
+          env:
+            - name: LOG_LEVEL               # one key from the ConfigMap
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: LOG_LEVEL
+            - name: DB_PASSWORD             # one key from the Secret
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: password
+          volumeMounts:
+            - name: config                  # the whole ConfigMap as a folder
+              mountPath: /etc/config
+              readOnly: true
+            - name: secret                  # the whole Secret as a folder
+              mountPath: /etc/secret
+              readOnly: true
+            - name: config                  # ONE file via subPath: never refreshed
+              mountPath: /app/greeting.txt
+              subPath: greeting.txt
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: app-config
+        - name: secret
+          secret:
+            secretName: db-credentials

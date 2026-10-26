@@ -1,0 +1,12 @@
+# Recipe 04 from github.com/ahmetb/kubernetes-network-policy-recipes (Apache-2.0), namespace changed to demo.
+# Every Pod in demo accepts traffic only from Pods in demo.
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata:
+  namespace: demo
+  name: deny-from-other-namespaces
+spec:
+  podSelector: {}          # applies to ALL Pods in demo
+  ingress:
+  - from:
+    - podSelector: {}      # allow from ALL Pods in the same namespace (no namespaceSelector = own namespace)
